@@ -18,6 +18,8 @@ from bot.keyboards.admin import (
 from bot.services.deepseek_agent import (
     DeepSeekAgentError,
     run_dialog,
+    SYSTEM_PROMPT_DIALOG,
+    SYSTEM_PROMPT_EXEC,
 )
 from bot.states.admin_states import AdminStates
 from bot.utils.admin import is_admin
@@ -119,14 +121,16 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
     task = (command.args or "").strip()
 
     if task:
-        # Сразу выполняем задачу
+        # Режим исполнения: входим в FSM-диалог И сразу выполняем задачу
+        # FSM нужен, чтобы если модель всё же что-то спросит — админ мог ответить
+        await state.set_state(AdminStates.deepseek_chat)
         thinking = await safe_edit_or_send(
             message,
-            "🤖 <b>DeepSeek AI</b>\n\n⏳ Думаю...",
+            "🤖 <b>DeepSeek AI</b>\n\n⏳ Выполняю задачу...",
             force_new=True,
         )
         try:
-            final = await run_dialog(task)
+            final = await run_dialog(task, system_prompt=SYSTEM_PROMPT_EXEC)
             await safe_edit_or_send(
                 thinking,
                 f"🤖 <b>DeepSeek AI</b>\n\n{final}",
@@ -198,7 +202,7 @@ async def handle_chat_message(message: Message):
     )
 
     try:
-        final = await run_dialog(text)
+        final = await run_dialog(text, system_prompt=SYSTEM_PROMPT_DIALOG)
         # Экранируем HTML-спецсимволы в ответе модели, кроме тех случаев
         # когда модель явно использует HTML-теги (доверяем модели)
         await safe_edit_or_send(
