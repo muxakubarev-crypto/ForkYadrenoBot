@@ -394,6 +394,7 @@ async def run_dialog(
                 tool_choice="auto",
                 temperature=0.3,
                 max_tokens=4096,
+                extra_body={"thinking": {"type": "disabled"}},
             )
         except Exception as e:
             raise DeepSeekAgentError(f"Ошибка DeepSeek API: {e}") from e
@@ -407,8 +408,11 @@ async def run_dialog(
 
         # Если модель хочет вызвать инструмент
         if finish_reason == "tool_calls" or choice.message.tool_calls:
+            # Извлекаем reasoning_content (DeepSeek thinking mode)
+            reasoning = getattr(choice.message, "reasoning_content", None)
+
             # Добавляем ответ модели в историю
-            messages.append({
+            assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": choice.message.content,
                 "tool_calls": [
@@ -422,7 +426,10 @@ async def run_dialog(
                     }
                     for tc in choice.message.tool_calls
                 ],
-            })
+            }
+            if reasoning:
+                assistant_msg["reasoning_content"] = reasoning
+            messages.append(assistant_msg)
 
             # Исполняем каждый tool_call
             for tc in choice.message.tool_calls:
