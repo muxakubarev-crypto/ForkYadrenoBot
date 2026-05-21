@@ -617,7 +617,6 @@ async def run_dialog(
                     await _progress(f"📖 Читаю {path_hint}...")
                 elif tool_name == "modify_file_content":
                     await _progress(f"✏️ Изменяю {path_hint}...")
-                    has_modify_this_round = True
                 elif tool_name == "restart_bot_process":
                     await _progress("⚠️ Перезапуск отложен (сделаю после ответа)")
                 elif tool_name == "execute_server_command":
@@ -625,11 +624,13 @@ async def run_dialog(
 
                 result_text = await _execute_tool_call(tool_name, args)
 
-                # Отслеживаем изменённые файлы
+                # Отслеживаем изменённые файлы и успешность modify
                 if tool_name == "modify_file_content" and not result_text.startswith("ОШИБКА"):
                     resolved_path = str(args.get("path", ""))
-                    if resolved_path and resolved_path not in modified_files:
-                        modified_files.append(resolved_path)
+                    if resolved_path:
+                        if resolved_path not in modified_files:
+                            modified_files.append(resolved_path)
+                        has_modify_this_round = True  # ТОЛЬКО после реального успеха
 
                 messages.append({
                     "role": "tool",
