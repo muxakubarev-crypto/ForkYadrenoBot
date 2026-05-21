@@ -62,6 +62,56 @@ _DANGEROUS_SHELL_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# Allowlist безопасных диагностических команд (только read-only)
+# ---------------------------------------------------------------------------
+_ALLOWED_COMMAND_PREFIXES: tuple[str, ...] = (
+    "free",
+    "df",
+    "uptime",
+    "top -bn1",
+    "ps ",
+    "ps aux",
+    "who",
+    "w ",
+    "last",
+    "hostnamectl",
+    "systemctl status ",
+    "systemctl list-units",
+    "systemctl is-active ",
+    "systemctl is-enabled ",
+    "journalctl -u yadreno-vpn --no-pager -n",
+    "journalctl -xe --no-pager -n",
+    "journalctl --no-pager -n",
+    "ip addr",
+    "ip link",
+    "ip route",
+    "ss -tlnp",
+    "ss -tln",
+    "netstat -tlnp",
+    "netstat -tln",
+    "curl -sS ",
+    "curl -s ",
+    "ping -c ",
+    "cat /proc/",
+    "lsblk",
+    "lscpu",
+    "lsmem",
+    "du -sh ",
+    "du -h --max-depth=",
+    "docker ps",
+    "docker stats --no-stream",
+    "tail -n ",
+    "head -n ",
+    "uname -a",
+    "iostat",
+    "vmstat",
+    "cat /etc/os-release",
+    "cat /etc/hostname",
+    "cat /root/YadrenoVPN/logs/bot.log",
+    "echo",
+)
+
 
 class DeepSeekAgentError(RuntimeError):
     """Ошибка при взаимодействии с DeepSeek API или исполнении tool_call."""
@@ -128,12 +178,20 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 Доступные инструменты:
 1. **read_file_content** — читать файлы
 2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
+3. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps, lscpu и др.)
 
 АЛГОРИТМ (строго по шагам, НЕ больше 2 операций чтения):
 1. Определи файл по правилам ниже. Если невозможно — задай 1 вопрос.
 2. read_file_content этого файла. НЕ читай другие.
 3. modify_file_content с ПОЛНЫМ новым содержимым.
 4. Короткий ответ строго по формуле.
+
+ДИАГНОСТИКА СЕРВЕРА (execute_server_command):
+- «покажи состояние сервера» → выполни 3-4 команды: free -h, df -h, uptime, ps aux --sort=-%mem | head -10
+- «что с логами» → journalctl -u yadreno-vpn --no-pager -n 30
+- «какая сеть» → ip addr, ss -tlnp
+- «проверь диски» → df -h, lsblk
+- Выводи результаты КОМПАКТНО, с заголовками. Не повторяй команды если уже выполнил.
 
 ГДЕ ЧТО (КРИТИЧЕСКИ ВЕРНО):
 - «Главное меню» / «меню пользователя» / «кнопки под /start» / «здесь»:
@@ -159,6 +217,7 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 1. **read_file_content** — читать файлы исходного кода бота
 2. **modify_file_content** — перезаписывать / править файлы кода (ПОЛНОСТЬЮ весь файл)
 3. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
+4. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps и др.)
 
 Правила диалогового режима:
 - Если задача непонятна — задай ОДИН уточняющий вопрос и жди ответа.
@@ -169,6 +228,7 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 - Пользовательские кнопки: bot/keyboards/user.py.
 - Обработчики: bot/handlers/.
 - НЕ вызывай restart_bot_process после изменений.
+- Для диагностики сервера используй execute_server_command с командами: free -h, df -h, uptime, ps aux, ip addr, ss -tlnp, journalctl.
 - Отвечай на русском языке, кратко."""
 
 
@@ -234,6 +294,23 @@ TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_server_command",
+            "description": "Выполняет read-only диагностическую команду на сервере (free, df, uptime, ps, top, ip, ss, journalctl и др.). Только безопасные команды.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell-команда для диагностики. Примеры: 'free -h', 'df -h', 'uptime', 'ps aux --sort=-%mem | head -10', 'ip addr', 'ss -tlnp', 'journalctl -u yadreno-vpn --no-pager -n 30', 'docker ps', 'lscpu', 'cat /proc/meminfo'",
+                    },
+                },
+                "required": ["command"],
             },
         },
     },
@@ -319,6 +396,66 @@ async def _restart_bot_process(service_name: str = "yadreno-vpn") -> str:
         return f"ОШИБКА перезапуска {service_name}: {e}"
 
 
+async def _execute_server_command(command: str) -> str:
+    """Выполняет безопасную диагностическую команду (allowlist + deny-list)."""
+    command = command.strip()
+    if not command:
+        return "ОШИБКА: пустая команда"
+
+    # Слой 1: allowlist префиксов
+    allowed = False
+    for prefix in _ALLOWED_COMMAND_PREFIXES:
+        if command.startswith(prefix) or command == prefix:
+            allowed = True
+            break
+    if not allowed:
+        return (
+            f"ОШИБКА: команда запрещена.\n"
+            f"Разрешённые префиксы: {', '.join(_ALLOWED_COMMAND_PREFIXES[:10])}..."
+        )
+
+    # Слой 2: deny-list опасных паттернов
+    try:
+        _reject_dangerous_shell(command)
+    except DeepSeekAgentError as e:
+        return f"ОШИБКА: {e}"
+
+    # Слой 3: выполнение с таймаутом
+    try:
+        if os.name == "nt":
+            return "ОШИБКА: выполнение команд недоступно на Windows."
+
+        process = await asyncio.create_subprocess_shell(
+            command,
+            cwd="/tmp",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+        output = (stdout or b"").decode("utf-8", errors="replace")
+        if stderr:
+            output += "\n[STDERR]\n" + (stderr or b"").decode("utf-8", errors="replace")
+
+        if process.returncode != 0:
+            output += f"\n[exit_code={process.returncode}]"
+
+        # Cap output
+        if len(output) > 3000:
+            output = output[:3000] + f"\n... (обрезано, всего {len(output)} символов)"
+
+        return output or "(пустой вывод)"
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return "ОШИБКА: таймаут команды (15 сек)"
+    except FileNotFoundError:
+        return "ОШИБКА: команда не найдена в системе"
+    except Exception as e:
+        return f"ОШИБКА выполнения: {e}"
+
+
 async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     """Диспетчер: исполняет tool_call и возвращает строку-результат."""
     logger.info(
@@ -344,6 +481,12 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     elif tool_name == "restart_bot_process":
         service_name = str(arguments.get("service_name", "yadreno-vpn")).strip()
         return await _restart_bot_process(service_name)
+
+    elif tool_name == "execute_server_command":
+        command = str(arguments.get("command", "")).strip()
+        if not command:
+            return "ОШИБКА: не указана команда для execute_server_command"
+        return await _execute_server_command(command)
 
     else:
         return f"ОШИБКА: неизвестный инструмент {tool_name!r}"
@@ -457,6 +600,7 @@ async def run_dialog(
 
                 tool_name = tc.function.name
                 path_hint = str(args.get("path", "")) if "path" in args else ""
+                cmd_hint = str(args.get("command", "")) if "command" in args else ""
 
                 if tool_name == "read_file_content":
                     await _progress(f"📖 Читаю {path_hint}...")
@@ -464,6 +608,8 @@ async def run_dialog(
                     await _progress(f"✏️ Изменяю {path_hint}...")
                 elif tool_name == "restart_bot_process":
                     await _progress("⚠️ Перезапуск отложен (сделаю после ответа)")
+                elif tool_name == "execute_server_command":
+                    await _progress(f"⚙️ Выполняю: {cmd_hint[:80]}...")
 
                 result_text = await _execute_tool_call(tool_name, args)
 
