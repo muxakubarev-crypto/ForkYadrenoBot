@@ -3,8 +3,13 @@
 
 Жёсткий firewall: доступ только для ADMIN_TELEGRAM_ID (строгое int-сравнение).
 Посторонние пользователи мгновенно отсекаются без объяснения причин (RCE-защита).
+
+Прогресс: каждый шаг агента виден в реальном времени.
+Перезапуск: автоматический после изменения файлов.
 """
 from __future__ import annotations
+
+import asyncio
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -17,6 +22,8 @@ from bot.keyboards.admin import (
 )
 from bot.services.deepseek_agent import (
     DeepSeekAgentError,
+    ProgressCallback,
+    _restart_bot_process,
     run_dialog,
     SYSTEM_PROMPT_DIALOG,
     SYSTEM_PROMPT_EXEC,
@@ -56,6 +63,59 @@ def _chat_intro_text() -> str:
         "Модель: <code>deepseek-v4-pro</code> (по умолчанию) / <code>deepseek-v4-flash</code>\n\n"
         "Чтобы остановить текущий запрос, отправьте <code>/cancel</code>."
     )
+
+
+# ---------------------------------------------------------------------------
+# Прогресс-коллбэк: редактирует thinking-сообщение в реальном времени
+# ---------------------------------------------------------------------------
+def _make_progress(anchor: Message):
+    """
+    Возвращает async-коллбэк для run_dialog(), который редактирует
+    сообщение-якорь, показывая текущий шаг агента.
+    """
+    async def _progress(step: str) -> None:
+        try:
+            await safe_edit_or_send(
+                anchor,
+                f"🤖 <b>DeepSeek AI</b>\n\n{escape_html(step)}",
+            )
+        except Exception:
+            pass
+
+    return _progress
+
+
+# ---------------------------------------------------------------------------
+# Авто-перезапуск после изменений
+# ---------------------------------------------------------------------------
+async def _auto_restart_if_needed(
+    modified_files: list[str],
+    anchor: Message,
+) -> None:
+    """Если были изменены файлы — перезапускает бота и сообщает об этом."""
+    if not modified_files:
+        return
+
+    files_list = ", ".join(modified_files)
+    await safe_edit_or_send(
+        anchor,
+        f"🤖 <b>DeepSeek AI</b>\n\n"
+        f"✅ Изменения внесены. Файлы: {escape_html(files_list)}.\n\n"
+        f"🔄 Перезапускаю бота...",
+    )
+
+    try:
+        result = await _restart_bot_process("yadreno-vpn")
+        await safe_edit_or_send(
+            anchor,
+            f"🤖 <b>DeepSeek AI</b>\n\n"
+            f"✅ Изменения внесены. Файлы: {escape_html(files_list)}.\n\n"
+            f"🔄 {escape_html(result)}",
+            reply_markup=deepseek_admin_chat_kb(),
+        )
+    except Exception:
+        # Если перезапуск убил процесс — сообщение не дойдёт, но это нормально
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +164,7 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
     """
     # ЖЁСТКИЙ FIREWALL
     if not _is_ai_admin(message.from_user.id):
-        return  # Мгновенный возврат без ответа — посторонний не узнает о существовании команды
+        return
 
     if not DEEPSEEK_API_KEY:
         await safe_edit_or_send(
@@ -121,21 +181,30 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
     task = (command.args or "").strip()
 
     if task:
-        # Режим исполнения: входим в FSM-диалог И сразу выполняем задачу
-        # FSM нужен, чтобы если модель всё же что-то спросит — админ мог ответить
+        # Режим исполнения: FSM + progress + авто-перезапуск
         await state.set_state(AdminStates.deepseek_chat)
         thinking = await safe_edit_or_send(
             message,
-            "🤖 <b>DeepSeek AI</b>\n\n⏳ Выполняю задачу...",
+            "🤖 <b>DeepSeek AI</b>\n\n⏳ Анализирую задачу...",
             force_new=True,
         )
+
+        progress = _make_progress(thinking)
         try:
-            final = await run_dialog(task, system_prompt=SYSTEM_PROMPT_EXEC)
+            final, modified_files = await run_dialog(
+                task,
+                system_prompt=SYSTEM_PROMPT_EXEC,
+                progress_callback=progress,
+            )
+            # Показываем ответ
             await safe_edit_or_send(
                 thinking,
                 f"🤖 <b>DeepSeek AI</b>\n\n{final}",
                 reply_markup=deepseek_admin_chat_kb(),
             )
+            # Авто-перезапуск если были изменения
+            if modified_files:
+                await _auto_restart_if_needed(modified_files, thinking)
         except DeepSeekAgentError as e:
             await safe_edit_or_send(
                 thinking,
@@ -201,15 +270,20 @@ async def handle_chat_message(message: Message):
         force_new=True,
     )
 
+    progress = _make_progress(thinking)
     try:
-        final = await run_dialog(text, system_prompt=SYSTEM_PROMPT_DIALOG)
-        # Экранируем HTML-спецсимволы в ответе модели, кроме тех случаев
-        # когда модель явно использует HTML-теги (доверяем модели)
+        final, modified_files = await run_dialog(
+            text,
+            system_prompt=SYSTEM_PROMPT_DIALOG,
+            progress_callback=progress,
+        )
         await safe_edit_or_send(
             thinking,
             f"🤖 <b>DeepSeek AI</b>\n\n{final}",
             reply_markup=deepseek_admin_chat_kb(),
         )
+        if modified_files:
+            await _auto_restart_if_needed(modified_files, thinking)
     except DeepSeekAgentError as e:
         await safe_edit_or_send(
             thinking,

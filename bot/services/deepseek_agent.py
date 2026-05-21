@@ -19,13 +19,16 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from openai import AsyncOpenAI
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, DEEPSEEK_PROXY
 
 logger = logging.getLogger(__name__)
+
+# Callback для прогресса: handler передаёт async-функцию, агент дёргает её с описанием шага
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -127,13 +130,11 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 Доступные инструменты:
 1. **read_file_content** — читать файлы
 2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
-3. **restart_bot_process** — перезапустить systemd-службу
 
 АЛГОРИТМ (строго по шагам, НЕ больше 2 операций чтения):
 1. read_file_content того файла, куда добавляешь кнопки. НЕ читай другие файлы «для контекста».
 2. Тут же modify_file_content с ПОЛНЫМ новым содержимым.
-3. restart_bot_process.
-4. Короткий ответ строго по формуле.
+3. Короткий ответ строго по формуле.
 
 ГДЕ ЧТО:
 - Главное меню (кнопки админки): bot/keyboards/admin_misc.py → функция admin_main_menu_kb()
@@ -144,10 +145,11 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 - Читать больше 1 файла перед изменением
 - Задавать вопросы
 - Добавлять кнопки в несколько файлов за один раз
+- Вызывать restart_bot_process (перезапуск сделает администратор)
 
 ОТВЕТ ВСЕГДА СТРОГАЯ ФОРМУЛА:
-«Файл X изменён: [что сделано]. Перезагрузка...»
-Если задача невыполнима — «Ошибка: [причина]»"""
+«✅ Файл X изменён: [что сделано].»
+Если задача невыполнима — «❌ Ошибка: [причина]»"""
 
 SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота Yadreno VPN.
 Ты общаешься с администратором сервера в режиме диалога.
@@ -155,7 +157,7 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 Доступные инструменты:
 1. **read_file_content** — читать файлы исходного кода бота
 2. **modify_file_content** — перезаписывать / править файлы кода (ПОЛНОСТЬЮ весь файл)
-3. **restart_bot_process** — перезапускать systemd-службу бота
+3. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
 
 Правила диалогового режима:
 - Если задача непонятна — задай ОДИН уточняющий вопрос и жди ответа.
@@ -165,7 +167,7 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 - Кнопки главного меню: bot/keyboards/admin_misc.py (admin_main_menu_kb).
 - Пользовательские кнопки: bot/keyboards/user.py.
 - Обработчики: bot/handlers/.
-- После успешных изменений вызывай restart_bot_process.
+- НЕ вызывай restart_bot_process после изменений.
 - Отвечай на русском языке, кратко."""
 
 
@@ -361,19 +363,32 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
 async def run_dialog(
     user_message: str,
     system_prompt: str | None = None,
-) -> str:
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[str, list[str]]:
     """
     Отправляет сообщение модели DeepSeek и выполняет полный цикл
     запрос → tool_calls → ответ (с повторами при необходимости).
 
+    НИКОГДА не вызывает restart_bot_process внутри — это делает handler после ответа.
+
     Args:
         user_message: Текст задачи от администратора.
         system_prompt: Системный промпт. Если None — используется SYSTEM_PROMPT_EXEC.
+        progress_callback: async-коллбэк для показа прогресса админу.
 
-    Возвращает финальный текст ответа для показа администратору.
+    Returns:
+        (финальный_текст, список_изменённых_файлов)
 
-    Выбрасывает DeepSeekAgentError при ошибках API.
+    Raises:
+        DeepSeekAgentError при ошибках API.
     """
+    async def _progress(msg: str) -> None:
+        if progress_callback:
+            try:
+                await progress_callback(msg)
+            except Exception:
+                pass
+
     if not DEEPSEEK_API_KEY:
         raise DeepSeekAgentError(
             "DEEPSEEK_API_KEY не задан. Добавьте ключ в .env или config.py."
@@ -388,8 +403,13 @@ async def run_dialog(
         {"role": "user", "content": user_message},
     ]
 
+    modified_files: list[str] = []
     max_tool_rounds = 10
+
     for _round in range(max_tool_rounds):
+        round_num = _round + 1
+        await _progress(f"📡 Раунд {round_num}/{max_tool_rounds}: DeepSeek думает...")
+
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -408,14 +428,12 @@ async def run_dialog(
 
         # Если модель вернула финальный текст
         if finish_reason == "stop" and choice.message.content:
-            return choice.message.content
+            return choice.message.content, modified_files
 
         # Если модель хочет вызвать инструмент
         if finish_reason == "tool_calls" or choice.message.tool_calls:
-            # Извлекаем reasoning_content (DeepSeek thinking mode)
             reasoning = getattr(choice.message, "reasoning_content", None)
 
-            # Добавляем ответ модели в историю
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": choice.message.content,
@@ -443,20 +461,35 @@ async def run_dialog(
                 except json.JSONDecodeError:
                     args = {}
 
-                result_text = await _execute_tool_call(tc.function.name, args)
+                tool_name = tc.function.name
+                path_hint = str(args.get("path", "")) if "path" in args else ""
 
-                # Добавляем результат в историю
+                if tool_name == "read_file_content":
+                    await _progress(f"📖 Читаю {path_hint}...")
+                elif tool_name == "modify_file_content":
+                    await _progress(f"✏️ Изменяю {path_hint}...")
+                elif tool_name == "restart_bot_process":
+                    await _progress("⚠️ Перезапуск отложен (сделаю после ответа)")
+
+                result_text = await _execute_tool_call(tool_name, args)
+
+                # Отслеживаем изменённые файлы (кроме restart — его делает handler)
+                if tool_name == "modify_file_content" and not result_text.startswith("ОШИБКА"):
+                    resolved_path = str(args.get("path", ""))
+                    if resolved_path and resolved_path not in modified_files:
+                        modified_files.append(resolved_path)
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result_text,
                 })
 
-            continue  # Ещё один раунд, чтобы модель обработала результаты
+            continue
 
         # Другие причины завершения
         if choice.message.content:
-            return choice.message.content
+            return choice.message.content, modified_files
 
         raise DeepSeekAgentError(
             f"Неожиданный finish_reason: {finish_reason}"
