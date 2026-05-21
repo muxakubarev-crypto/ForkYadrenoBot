@@ -9,7 +9,7 @@ from .admin_groups import *
 from .admin_broadcast import *
 from .admin_users import *
 from .admin_settings import *
-from .admin_yadreno import *
+from .admin_deepseek import *
 
 __all__ = [
     'BROADCAST_FILTERS',
@@ -80,7 +80,6 @@ __all__ = [
     'referral_main_kb',
     'referral_level_kb',
     'referral_back_kb',
-    'yadreno_admin_no_key_kb',
-    'yadreno_admin_chat_kb',
-    'yadreno_admin_cancel_key_kb',
+    'deepseek_admin_no_key_kb',
+    'deepseek_admin_chat_kb',
 ]

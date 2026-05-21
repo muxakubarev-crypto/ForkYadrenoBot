@@ -2,3 +2,5 @@ aiogram>=3.3.0
 aiohttp
 qrcode
 pillow
+openai>=1.0.0
+httpx[socks]

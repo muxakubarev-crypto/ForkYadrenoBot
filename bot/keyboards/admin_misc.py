@@ -49,7 +49,7 @@ def admin_main_menu_kb() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(
-            text='🤖 Yadreno Admin',
+            text='🤖 DeepSeek AI',
             callback_data='admin_yadreno',
             style='primary',
         )

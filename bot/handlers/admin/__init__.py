@@ -17,7 +17,7 @@ from bot.handlers.admin.system import router as system_router
 from bot.handlers.admin.trial import router as trial_router
 from bot.handlers.admin.referral import router as referral_router
 from bot.handlers.admin.groups import router as groups_router
-from bot.handlers.admin.yadreno_admin import router as yadreno_admin_router
+from bot.handlers.admin.deepseek_admin import router as deepseek_admin_router
 
 admin_router = Router()
 
@@ -35,5 +35,5 @@ admin_router.include_router(users_keys_deleted_router)
 admin_router.include_router(system_router)
 admin_router.include_router(trial_router)
 admin_router.include_router(referral_router)
-admin_router.include_router(yadreno_admin_router)
+admin_router.include_router(deepseek_admin_router)
 

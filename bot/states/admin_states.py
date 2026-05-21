@@ -11,8 +11,7 @@ class AdminStates(StatesGroup):
     
     # ========== Главное меню ==========
     admin_menu = State()  # Главный экран админки
-    yadreno_waiting_api_key = State()  # Ввод персонального api_key Yadreno Admin
-    yadreno_chat = State()  # Диалог с агентом Yadreno Admin
+    deepseek_chat = State()  # Диалог с ИИ-агентом DeepSeek AI
     
     # ========== Управление серверами ==========
     servers_list = State()           # Список серверов
