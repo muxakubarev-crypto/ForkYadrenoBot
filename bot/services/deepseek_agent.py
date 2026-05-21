@@ -644,6 +644,11 @@ async def run_dialog(
             else:
                 rounds_without_modify += 1
 
+            # Если файл был изменён — немедленно выходим с сообщением
+            if modified_files:
+                files_list = ", ".join(modified_files)
+                return f"✅ Файл {files_list} изменён: кнопки добавлены.", modified_files
+
             continue
 
         # Другие причины завершения
