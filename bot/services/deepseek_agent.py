@@ -129,17 +129,21 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
 3. **restart_bot_process** — перезапустить systemd-службу
 
-АЛГОРИТМ РАБОТЫ (строго соблюдай):
-1. Сразу читай read_file_content нужных файлов — НЕ спрашивай какие, читай те что вероятнее всего.
-2. Вноси изменения через modify_file_content (ВЕСЬ файл целиком).
-3. Вызови restart_bot_process.
-4. Напиши ОДНИМ предложением что сделано.
+АЛГОРИТМ (строго по шагам, НЕ больше 2 операций чтения):
+1. read_file_content того файла, куда добавляешь кнопки. НЕ читай другие файлы «для контекста».
+2. Тут же modify_file_content с ПОЛНЫМ новым содержимым.
+3. restart_bot_process.
+4. Короткий ответ строго по формуле.
 
-ГДЕ ЧТО ЛЕЖИТ:
-- Кнопки главного меню: bot/keyboards/admin_misc.py → admin_main_menu_kb()
-- Стартовое сообщение /start: bot/handlers/user/start.py
+ГДЕ ЧТО:
+- Главное меню (кнопки админки): bot/keyboards/admin_misc.py → функция admin_main_menu_kb()
+- Стартовое сообщение: bot/handlers/user/start.py
 - Пользовательские кнопки: bot/keyboards/user.py
-- Обработчики: bot/handlers/
+
+ЗАПРЕЩЕНО:
+- Читать больше 1 файла перед изменением
+- Задавать вопросы
+- Добавлять кнопки в несколько файлов за один раз
 
 ОТВЕТ ВСЕГДА СТРОГАЯ ФОРМУЛА:
 «Файл X изменён: [что сделано]. Перезагрузка...»
@@ -384,7 +388,7 @@ async def run_dialog(
         {"role": "user", "content": user_message},
     ]
 
-    max_tool_rounds = 5
+    max_tool_rounds = 10
     for _round in range(max_tool_rounds):
         try:
             response = await client.chat.completions.create(
