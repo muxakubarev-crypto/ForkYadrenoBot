@@ -519,6 +519,26 @@ async def run_dialog(
     model = DEEPSEEK_MODEL
 
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT_EXEC
+
+    # Классификация задачи -> фильтрация инструментов
+    msg_lower = user_message.lower()
+    CODE_KW = ("кнопк", "добав", "меню", "измен", "файл", "код", "исправ",
+               "перепиш", "сделай", "создай", "удали", "поправ", "прав",
+               "убери", "замени", "переименуй", "отредактируй", "напиши",
+               "запиши", "вставь", "перемести")
+    DIAG_KW = ("сервер", "лог", "состоян", "покаж", "провер", "статус",
+               "диск", "память", "ram", "cpu", "процесс", "порт", "сет",
+               "ip", "трафик", "нагрузк", "место", "свободно", "занято",
+               "контейнер", "docker", "журнал")
+    is_code = any(kw in msg_lower for kw in CODE_KW)
+    is_diag = any(kw in msg_lower for kw in DIAG_KW)
+    if is_code and not is_diag:
+        active_tools = [t for t in TOOLS if t["function"]["name"] != "execute_server_command"]
+    elif is_diag and not is_code:
+        active_tools = [t for t in TOOLS if t["function"]["name"] != "modify_file_content"]
+    else:
+        active_tools = TOOLS
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": user_message},
@@ -553,7 +573,7 @@ async def run_dialog(
             response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=TOOLS,
+                tools=active_tools,
                 tool_choice="auto",
                 temperature=0.3,
                 max_tokens=4096,
