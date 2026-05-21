@@ -173,43 +173,26 @@ def _build_client() -> AsyncOpenAI:
 SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администратор VPN-бота Yadreno VPN в РЕЖИМЕ ИСПОЛНЕНИЯ.
 
 КРИТИЧЕСКИ ВАЖНО: Ты НИКОГДА не задаёшь уточняющих вопросов, КРОМЕ случая полной неопределённости.
-Если ты СОВСЕМ не можешь определить место — задай ОДИН короткий вопрос и жди ответа.
-В остальных случаях действуешь сам.
 
-Доступные инструменты:
-1. **read_file_content** — читать файлы
-2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
-3. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps, lscpu и др.)
+РЕЖИМЫ РАБОТЫ (НЕ СМЕШИВАЙ ИХ):
 
-АЛГОРИТМ (КРИТИЧЕСКИ: МАКСИМУМ 3 РАУНДА):
-Раунд 1: read_file_content нужного файла (НЕ читай другие).
-Раунд 2: modify_file_content с ПОЛНЫМ новым содержимым.
-Раунд 3: короткий ответ.
-ЕСЛИ НЕ УЛОЖИЛСЯ В 3 РАУНДА — ТЫ ПРОВАЛИЛ ЗАДАЧУ.
+=== РЕЖИМ «КОД» (задача про кнопки/файлы/код) ===
+АЛГОРИТМ — РОВНО 2 ШАГА:
+Шаг 1: read_file_content. НЕ читай другие файлы.
+Шаг 2: modify_file_content с ПОЛНЫМ новым содержимым. Добавляй кнопки в начало тела функции.
+ВСЁ. НИКАКИХ ДРУГИХ ИНСТРУМЕНТОВ. НЕ вызывай execute_server_command в режиме «код».
 
-ДИАГНОСТИКА СЕРВЕРА (execute_server_command):
-- «покажи состояние сервера» → выполни 3-4 команды: free -h, df -h, uptime, ps aux --sort=-%mem | head -10
-- «что с логами» → journalctl -u yadreno-vpn --no-pager -n 30
-- «какая сеть» → ip addr, ss -tlnp
-- «проверь диски» → df -h, lsblk
-- Выводи результаты КОМПАКТНО, с заголовками. Не повторяй команды если уже выполнил.
-
-ГДЕ ЧТО (КРИТИЧЕСКИ ВЕРНО):
-- «Главное меню» / «меню пользователя» / «кнопки под /start» / «здесь»:
-  → bot/keyboards/user.py (функции user_main_menu_kb или аналогичные)
+ГДЕ ЧТО:
+- «Главное меню» / «здесь» / «меню пользователя» / «под /start» / «в этом меню»:
+  → bot/keyboards/user.py → функция main_menu_kb() (вставь кнопки после builder = InlineKeyboardBuilder())
 - «Админ-панель» / «меню администратора» / «меню админки»:
-  → bot/keyboards/admin_misc.py → функция admin_main_menu_kb()
-- Стартовое сообщение /start: bot/handlers/user/start.py
-- При слове «здесь» или «в этом меню» — ВСЕГДА bot/keyboards/user.py
+  → bot/keyboards/admin_misc.py → admin_main_menu_kb()
 
-ЗАПРЕЩЕНО:
-- Читать больше 1 файла
-- Добавлять кнопки в несколько файлов за раз
-- Вызывать restart_bot_process
+=== РЕЖИМ «ДИАГНОСТИКА» (задача про сервер/логи/сеть/диски) ===
+execute_server_command: free -h, df -h, uptime, ps aux --sort=-%mem | head -10, journalctl, ip addr, ss -tlnp, lsblk
 
-ОТВЕТ:
-«✅ Файл X изменён: [что сделано].»
-«❌ ОШИБКА: [причина]»"""
+ЗАПРЕЩЕНО: вопросы, restart, чтение >1 файла, смешивание режимов.
+ОТВЕТ: «✅ Файл X изменён: [что].» / «❌ ОШИБКА: [причина]»"""
 
 SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота Yadreno VPN.
 Ты общаешься с администратором сервера в режиме диалога.
@@ -547,8 +530,17 @@ async def run_dialog(
     EARLY_ABORT_AFTER = 4
 
     for _round in range(max_tool_rounds):
-        # Ранний abort: слишком много раундов без modify_file_content
-        if rounds_without_modify >= EARLY_ABORT_AFTER:
+        # Ранний abort или forced modify
+        if rounds_without_modify == 2:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "ТЫ УЖЕ ПРОЧИТАЛ ФАЙЛ. НЕМЕДЛЕННО ВЫЗОВИ modify_file_content. "
+                    "Добавь кнопки в первую функцию клавиатуры. НЕ читай другие файлы. "
+                    "НЕ вызывай execute_server_command. ТОЛЬКО modify_file_content."
+                ),
+            })
+        elif rounds_without_modify >= EARLY_ABORT_AFTER:
             raise DeepSeekAgentError(
                 f"Не удалось найти файл для изменения за {rounds_without_modify} раундов. "
                 f"Уточните задачу: какой именно файл или экран нужно изменить?"
