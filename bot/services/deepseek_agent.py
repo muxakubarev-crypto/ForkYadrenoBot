@@ -121,35 +121,36 @@ def _build_client() -> AsyncOpenAI:
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администратор VPN-бота Yadreno VPN в РЕЖИМЕ ИСПОЛНЕНИЯ.
 
-КРИТИЧЕСКИ ВАЖНО: Ты НИКОГДА, НИ ПРИ КАКИХ ОБСТОЯТЕЛЬСТВАХ не задаёшь уточняющих вопросов.
-Ты САМ принимаешь решение «куда» и «как» на основе анализа кодовой базы.
-Если не уверен — всё равно действуешь, выбрав наиболее вероятный вариант.
-
-ЕСЛИ ТЫ ЗАДАШЬ ВОПРОС — ТЫ НАРУШИШЬ ПРОТОКОЛ. ДИАЛОГ РАЗОРВЁТСЯ.
+КРИТИЧЕСКИ ВАЖНО: Ты НИКОГДА не задаёшь уточняющих вопросов, КРОМЕ случая полной неопределённости.
+Если ты СОВСЕМ не можешь определить место — задай ОДИН короткий вопрос и жди ответа.
+В остальных случаях действуешь сам.
 
 Доступные инструменты:
 1. **read_file_content** — читать файлы
 2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
 
 АЛГОРИТМ (строго по шагам, НЕ больше 2 операций чтения):
-1. read_file_content того файла, куда добавляешь кнопки. НЕ читай другие файлы «для контекста».
-2. Тут же modify_file_content с ПОЛНЫМ новым содержимым.
-3. Короткий ответ строго по формуле.
+1. Определи файл по правилам ниже. Если невозможно — задай 1 вопрос.
+2. read_file_content этого файла. НЕ читай другие.
+3. modify_file_content с ПОЛНЫМ новым содержимым.
+4. Короткий ответ строго по формуле.
 
-ГДЕ ЧТО:
-- Главное меню (кнопки админки): bot/keyboards/admin_misc.py → функция admin_main_menu_kb()
-- Стартовое сообщение: bot/handlers/user/start.py
-- Пользовательские кнопки: bot/keyboards/user.py
+ГДЕ ЧТО (КРИТИЧЕСКИ ВЕРНО):
+- «Главное меню» / «меню пользователя» / «кнопки под /start» / «здесь»:
+  → bot/keyboards/user.py (функции user_main_menu_kb или аналогичные)
+- «Админ-панель» / «меню администратора» / «меню админки»:
+  → bot/keyboards/admin_misc.py → функция admin_main_menu_kb()
+- Стартовое сообщение /start: bot/handlers/user/start.py
+- При слове «здесь» или «в этом меню» — ВСЕГДА bot/keyboards/user.py
 
 ЗАПРЕЩЕНО:
-- Читать больше 1 файла перед изменением
-- Задавать вопросы
-- Добавлять кнопки в несколько файлов за один раз
-- Вызывать restart_bot_process (перезапуск сделает администратор)
+- Читать больше 1 файла
+- Добавлять кнопки в несколько файлов за раз
+- Вызывать restart_bot_process
 
-ОТВЕТ ВСЕГДА СТРОГАЯ ФОРМУЛА:
+ОТВЕТ:
 «✅ Файл X изменён: [что сделано].»
-Если задача невыполнима — «❌ Ошибка: [причина]»"""
+«❌ ОШИБКА: [причина]»"""
 
 SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота Yadreno VPN.
 Ты общаешься с администратором сервера в режиме диалога.
@@ -301,24 +302,17 @@ async def _restart_bot_process(service_name: str = "yadreno-vpn") -> str:
         if os.name == "nt":
             return "ОШИБКА: systemctl недоступен на Windows. Перезапустите бота вручную."
 
-        process = await asyncio.create_subprocess_exec(
-            "systemctl", "restart", service_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # Fire-and-forget: не ждём завершения, т.к. systemctl restart убьёт ЭТОТ процесс
+        subprocess.Popen(
+            ["systemctl", "restart", service_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
-
-        if process.returncode == 0:
-            logger.info(
-                "DeepSeek Agent tool: restart_bot_process service=%s OK",
-                service_name,
-            )
-            return f"Служба {service_name} успешно перезапущена."
-        else:
-            error_msg = (stderr or stdout or b"").decode("utf-8", errors="replace")
-            return f"ОШИБКА перезапуска {service_name} (exit={process.returncode}): {error_msg}"
-    except asyncio.TimeoutError:
-        return f"ОШИБКА: таймаут перезапуска {service_name} (30 сек)"
+        logger.info(
+            "DeepSeek Agent tool: restart_bot_process service=%s triggered (fire-and-forget)",
+            service_name,
+        )
+        return f"Служба {service_name} перезапускается..."
     except FileNotFoundError:
         return "ОШИБКА: systemctl не найден в системе"
     except Exception as e:

@@ -97,24 +97,23 @@ async def _auto_restart_if_needed(
         return
 
     files_list = ", ".join(modified_files)
+
+    # Сначала показываем сообщение
     await safe_edit_or_send(
         anchor,
         f"🤖 <b>DeepSeek AI</b>\n\n"
         f"✅ Изменения внесены. Файлы: {escape_html(files_list)}.\n\n"
-        f"🔄 Перезапускаю бота...",
+        f"🔄 Перезапускаю бота...\n"
+        f"<i>Бот вернётся через ~5 секунд. Отправьте /start.</i>",
+        reply_markup=deepseek_admin_chat_kb(),
     )
 
+    # Даём Telegram 2 секунды доставить сообщение
+    await asyncio.sleep(2)
+
     try:
-        result = await _restart_bot_process("yadreno-vpn")
-        await safe_edit_or_send(
-            anchor,
-            f"🤖 <b>DeepSeek AI</b>\n\n"
-            f"✅ Изменения внесены. Файлы: {escape_html(files_list)}.\n\n"
-            f"🔄 {escape_html(result)}",
-            reply_markup=deepseek_admin_chat_kb(),
-        )
+        await _restart_bot_process("yadreno-vpn")
     except Exception:
-        # Если перезапуск убил процесс — сообщение не дойдёт, но это нормально
         pass
 
 
