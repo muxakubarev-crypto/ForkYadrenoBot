@@ -1,14 +1,15 @@
 """
 Локальный асинхронный ИИ-агент на базе DeepSeek API (OpenAI-совместимый).
 
-Предоставляет три инструмента (Function Calling / Tools):
-- read_file_content  — чтение файлов бота
-- modify_file_content — перезапись / правка кода
-- restart_bot_process — перезапуск systemd-службы
+Предоставляет инструменты (Function Calling / Tools):
+- read_file_content       — чтение файлов бота
+- modify_file_content     — перезапись / правка кода
+- restart_bot_process     — перезапуск systemd-службы
+- execute_server_command  — диагностика сервера (allowlist + deny-list)
 
 Безопасность:
 - Все пути валидируются через _resolve_tool_path (не выходят за PROJECT_ROOT)
-- Shell-команды проверяются deny-листом опасных паттернов
+- Shell-команды проверяются deny-листом опасных паттернов и allowlist префиксов
 - Полный аудит каждого tool_call в лог
 """
 from __future__ import annotations
@@ -180,11 +181,11 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 2. **modify_file_content** — ПЕРЕЗАПИСАТЬ файл ПОЛНОСТЬЮ
 3. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps, lscpu и др.)
 
-АЛГОРИТМ (строго по шагам, НЕ больше 2 операций чтения):
-1. Определи файл по правилам ниже. Если невозможно — задай 1 вопрос.
-2. read_file_content этого файла. НЕ читай другие.
-3. modify_file_content с ПОЛНЫМ новым содержимым.
-4. Короткий ответ строго по формуле.
+АЛГОРИТМ (КРИТИЧЕСКИ: МАКСИМУМ 3 РАУНДА):
+Раунд 1: read_file_content нужного файла (НЕ читай другие).
+Раунд 2: modify_file_content с ПОЛНЫМ новым содержимым.
+Раунд 3: короткий ответ.
+ЕСЛИ НЕ УЛОЖИЛСЯ В 3 РАУНДА — ТЫ ПРОВАЛИЛ ЗАДАЧУ.
 
 ДИАГНОСТИКА СЕРВЕРА (execute_server_command):
 - «покажи состояние сервера» → выполни 3-4 команды: free -h, df -h, uptime, ps aux --sort=-%mem | head -10
@@ -320,7 +321,7 @@ TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 # Исполнение tool_call
 # ---------------------------------------------------------------------------
-async def _read_file_content(path: str, max_lines: int = 500) -> str:
+async def _read_file_content(path: str, max_lines: int = 2000) -> str:
     """Читает файл и возвращает его содержимое."""
     resolved = _resolve_tool_path(path)
     if not resolved.is_file():
@@ -542,8 +543,17 @@ async def run_dialog(
 
     modified_files: list[str] = []
     max_tool_rounds = 10
+    rounds_without_modify = 0
+    EARLY_ABORT_AFTER = 4
 
     for _round in range(max_tool_rounds):
+        # Ранний abort: слишком много раундов без modify_file_content
+        if rounds_without_modify >= EARLY_ABORT_AFTER:
+            raise DeepSeekAgentError(
+                f"Не удалось найти файл для изменения за {rounds_without_modify} раундов. "
+                f"Уточните задачу: какой именно файл или экран нужно изменить?"
+            )
+
         round_num = _round + 1
         await _progress(f"📡 Раунд {round_num}/{max_tool_rounds}: DeepSeek думает...")
 
@@ -591,6 +601,7 @@ async def run_dialog(
             messages.append(assistant_msg)
 
             # Исполняем каждый tool_call
+            has_modify_this_round = False
             for tc in choice.message.tool_calls:
                 import json
                 try:
@@ -606,6 +617,7 @@ async def run_dialog(
                     await _progress(f"📖 Читаю {path_hint}...")
                 elif tool_name == "modify_file_content":
                     await _progress(f"✏️ Изменяю {path_hint}...")
+                    has_modify_this_round = True
                 elif tool_name == "restart_bot_process":
                     await _progress("⚠️ Перезапуск отложен (сделаю после ответа)")
                 elif tool_name == "execute_server_command":
@@ -613,7 +625,7 @@ async def run_dialog(
 
                 result_text = await _execute_tool_call(tool_name, args)
 
-                # Отслеживаем изменённые файлы (кроме restart — его делает handler)
+                # Отслеживаем изменённые файлы
                 if tool_name == "modify_file_content" and not result_text.startswith("ОШИБКА"):
                     resolved_path = str(args.get("path", ""))
                     if resolved_path and resolved_path not in modified_files:
@@ -624,6 +636,12 @@ async def run_dialog(
                     "tool_call_id": tc.id,
                     "content": result_text,
                 })
+
+            # Сброс или инкремент счётчика
+            if has_modify_this_round:
+                rounds_without_modify = 0
+            else:
+                rounds_without_modify += 1
 
             continue
 
