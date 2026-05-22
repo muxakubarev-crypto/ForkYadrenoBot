@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-05-22T18:41:29",
+  "db_path": "/root/YadrenoVPN/database/vpn_bot.db",
+  "db_size_bytes": 159744,
+  "pages_count": 6,
+  "settings_count": 33,
+  "tag": "before-ai-rework",
+  "note": "Содержит только кастомизацию страниц и настройки. Не содержит пользователей, ключей, платежей."
+}
