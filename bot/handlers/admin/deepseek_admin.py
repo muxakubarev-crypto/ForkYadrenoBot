@@ -28,6 +28,7 @@ from bot.services.deepseek_agent import (
     SYSTEM_PROMPT_DIALOG,
     SYSTEM_PROMPT_EXEC,
 )
+from bot.services.page_context import get_page_context
 from bot.states.admin_states import AdminStates
 from bot.utils.admin import is_admin
 from bot.utils.text import escape_html, safe_edit_or_send
@@ -182,11 +183,17 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
     if task:
         # Режим исполнения: FSM + progress + авто-перезапуск
         await state.set_state(AdminStates.deepseek_chat)
-        thinking = await safe_edit_or_send(
-            message,
-            "🤖 <b>DeepSeek AI</b>\n\n⏳ Анализирую задачу...",
-            force_new=True,
-        )
+
+        # Читаем контекст экрана: какую page-страницу админ смотрел последней.
+        # render_page() автоматически пишет её в page_context при каждом рендере для админа.
+        ctx = get_page_context(message.from_user.id)
+        current_page_key = ctx.page_key if ctx else None
+
+        intro = "🤖 <b>DeepSeek AI</b>\n\n⏳ Анализирую задачу..."
+        if current_page_key:
+            intro += f"\n<i>🖼 контекст: {escape_html(current_page_key)}</i>"
+
+        thinking = await safe_edit_or_send(message, intro, force_new=True)
 
         progress = _make_progress(thinking)
         try:
@@ -194,6 +201,7 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
                 task,
                 system_prompt=SYSTEM_PROMPT_EXEC,
                 progress_callback=progress,
+                current_page_key=current_page_key,
             )
             # Показываем ответ
             await safe_edit_or_send(
@@ -263,11 +271,15 @@ async def handle_chat_message(message: Message):
     if not text:
         return
 
-    thinking = await safe_edit_or_send(
-        message,
-        "🤖 <b>DeepSeek AI</b>\n\n⏳ Думаю...",
-        force_new=True,
-    )
+    # Контекст: какую страницу админ смотрел последней (для «здесь / сюда»)
+    ctx = get_page_context(message.from_user.id)
+    current_page_key = ctx.page_key if ctx else None
+
+    intro = "🤖 <b>DeepSeek AI</b>\n\n⏳ Думаю..."
+    if current_page_key:
+        intro += f"\n<i>🖼 контекст: {escape_html(current_page_key)}</i>"
+
+    thinking = await safe_edit_or_send(message, intro, force_new=True)
 
     progress = _make_progress(thinking)
     try:
@@ -275,6 +287,7 @@ async def handle_chat_message(message: Message):
             text,
             system_prompt=SYSTEM_PROMPT_DIALOG,
             progress_callback=progress,
+            current_page_key=current_page_key,
         )
         await safe_edit_or_send(
             thinking,

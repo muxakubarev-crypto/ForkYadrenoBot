@@ -179,6 +179,16 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 
 КРИТИЧЕСКИ ВАЖНО: Ты НИКОГДА не задаёшь уточняющих вопросов, КРОМЕ случая полной неопределённости.
 
+=== КОНТЕКСТ ЭКРАНА АДМИНА ===
+В начале задачи может быть строка [CONTEXT] current_page_key='<key>' — это значит
+админ сейчас стоит на этой странице бота. Используй её так:
+- Слова «здесь», «сюда», «тут», «туда», «это меню», «эта страница», «вот тут»,
+  «у меня сейчас», «текущий экран» → page_key = current_page_key.
+- Если в задаче явно не указан page_key или название страницы — DEFAULT page_key =
+  current_page_key. Не спрашивай и не угадывай по тексту задачи.
+- Если current_page_key НЕ задан и в задаче нет упоминания страницы — используй 'main'.
+- Поддерживаемые page_key: 'main', 'help', 'trial', 'prepayment', 'referral', 'key_delivery'.
+
 РЕЖИМЫ РАБОТЫ (НЕ СМЕШИВАЙ ИХ):
 
 === РЕЖИМ «КОД» (задача про кнопки/файлы/код) ===
@@ -249,6 +259,13 @@ execute_server_command: free -h, df -h, uptime, ps aux --sort=-%mem | head -10, 
 
 SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота Yadreno VPN.
 Ты общаешься с администратором сервера в режиме диалога.
+
+КОНТЕКСТ ЭКРАНА АДМИНА:
+В начале сообщения может быть строка [CONTEXT] current_page_key='<key>' — это значит
+админ сейчас стоит на этой странице бота. Слова «здесь», «сюда», «тут», «это меню»,
+«эта страница» относятся к ней. Если page_key явно не упомянут — используй
+current_page_key как default. Если контекста нет и страница не упомянута — 'main'.
+Поддерживаемые page_key: 'main', 'help', 'trial', 'prepayment', 'referral', 'key_delivery'.
 
 Доступные инструменты:
 1. **read_file_content** — читать файлы исходного кода бота
@@ -913,10 +930,20 @@ async def run_dialog(
     user_message: str,
     system_prompt: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    current_page_key: Optional[str] = None,
 ) -> tuple[str, list[str]]:
     """
     Отправляет сообщение модели DeepSeek и выполняет полный цикл
     запрос → tool_calls → ответ (с повторами при необходимости).
+
+    Args:
+        user_message: текст задачи от админа.
+        system_prompt: системный промпт; если None — используется SYSTEM_PROMPT_EXEC.
+        progress_callback: async-коллбэк для шагов в Telegram.
+        current_page_key: ключ страницы pages, на которой админ был последний раз
+            (читается через bot.services.page_context.get_page_context). Если задан,
+            добавляется в начало пользовательского сообщения и модель использует его
+            как default для get_page_buttons / update_page_buttons.
 
     НИКОГДА не вызывает restart_bot_process внутри — это делает handler после ответа.
 
@@ -980,9 +1007,25 @@ async def run_dialog(
     else:
         active_tools = TOOLS
 
+    # Подмешиваем контекст экрана админа, если он передан.
+    # Это сильнее всего помогает модели понять «здесь/сюда/тут» в командах вроде
+    # «/ai добавь сюда кнопку» — она увидит current_page_key и подставит его как default.
+    page_context_key = (current_page_key or "").strip()
+    if page_context_key:
+        contextualized_user_message = (
+            f"[CONTEXT] current_page_key='{page_context_key}'\n"
+            f"(Админ сейчас находится на этой странице бота. Слова "
+            f"«здесь», «сюда», «тут», «туда», «это меню», «эта страница» "
+            f"относятся к ней. Если в задаче явный page_key не указан — "
+            f"используй current_page_key как default.)\n\n"
+            f"ЗАДАЧА: {user_message}"
+        )
+    else:
+        contextualized_user_message = user_message
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": user_message},
+        {"role": "user", "content": contextualized_user_message},
     ]
 
     modified_files: list[str] = []
