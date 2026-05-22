@@ -200,7 +200,7 @@ replace = тот же фрагмент + новые кнопки ПЕРЕД ни
 
 ГДЕ ЧТО:
 - «Главное меню» / «здесь» / «меню пользователя» / «под /start» / «в этом меню»:
-  → bot/keyboards/user.py → функция main_menu_kb() (вставь кнопки после builder = InlineKeyboardBuilder())
+  → database/migrations.py → словарь page_defaults['main']['buttons'] (добавь новые кнопки в JSON-список, указав уникальный id, label, row, col, action_type='url' и action_value со ссылкой)
 - «Админ-панель» / «меню администратора» / «меню админки»:
   → bot/keyboards/admin_misc.py → admin_main_menu_kb()
 - Новый файл (не существует) → используй modify_file_content
@@ -223,11 +223,10 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 
 Правила диалогового режима:
 - Если задача непонятна — задай ОДИН уточняющий вопрос и жди ответа.
-- Если задача ясна — сразу выполняй через инструменты, не переспрашивай.
+- If задача ясна — сразу выполняй через инструменты, не переспрашивай.
 - Перед изменением существующего файла: read_file_content → patch_file_content (скопируй фрагмент ОДИН-В-ОДИН как search).
 - Для нового файла используй modify_file_content.
-- Кнопки главного меню: bot/keyboards/admin_misc.py (admin_main_menu_kb).
-- Пользовательские кнопки: bot/keyboards/user.py.
+- Кнопки главного меню: database/migrations.py (словарь page_defaults['main']['buttons']). Добавляй новые кнопки в JSON-список, указав уникальный id, label, row, col, action_type='url' и action_value со ссылкой.
 - Обработчики: bot/handlers/.
 - НЕ вызывай restart_bot_process после изменений.
 - Для диагностики сервера используй execute_server_command с командами: free -h, df -h, uptime, ps aux, ip addr, ss -tlnp, journalctl.
