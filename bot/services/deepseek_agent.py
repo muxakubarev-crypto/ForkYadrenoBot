@@ -273,10 +273,16 @@ update_page_buttons — ты ЗАТРЁШЬ все ранее добавленн
 • «измени/перепиши текст» → update_page_text(page_key, text='новый HTML-текст')
 • «сбрось/верни дефолтный текст» → reset_page_text(page_key)
 • «поставь картинку», «обнови фото» → update_page_image(page_key, image='<file_id или URL>')
-  ВАЖНО: если в [CONTEXT] есть pending_image_file_id — используй именно его (админ только
-  что прислал фото). Не выдумывай file_id.
+  ИСТОЧНИКИ image (в порядке приоритета):
+   1) [CONTEXT].pending_image_file_id — админ только что прислал фото. Используй его.
+   2) URL из задачи — если в тексте есть http(s)://...
+  НИКОГДА НЕ ВЫДУМЫВАЙ file_id. Если pending_image_file_id нет и URL в задаче нет —
+  ответь админу: «Пришли фото в чат или дай URL» и НИЧЕГО НЕ ВЫЗЫВАЙ.
 • «убери картинку» → reset_page_image(page_key)
 • «что сейчас на странице» / нужно понять состояние → get_page_content(page_key)
+• «верни как было», «отмени всё», «сбрось страницу» → reset_page(page_key)
+  ВНИМАНИЕ: reset_page очищает ВСЕ кастомные правки (text, image, buttons).
+  Используй только когда админ явно просит откат.
 
 ПРИМЕР 5 — «поставь сюда эту картинку» (контекст: current_page_key='main', pending_image_file_id='AgACAg...'):
 1) update_page_image('main', image='AgACAg...')   # используешь file_id из [CONTEXT]
@@ -530,6 +536,25 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "reset_page_image",
             "description": "Сбрасывает кастомную картинку страницы.",
+            "parameters": {
+                "type": "object",
+                "properties": {"page_key": {"type": "string"}},
+                "required": ["page_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_page",
+            "description": (
+                "АВАРИЙНЫЙ СБРОС: убирает ВСЕ кастомизации страницы (text_custom, "
+                "image_custom, buttons_custom → NULL). Рендер возвращается к дефолтам "
+                "разработчика. Используй для задач «верни как было», «отмени все правки», "
+                "«сбрось страницу», «всё сломалось, верни дефолт». ОДНОЙ командой откатывает "
+                "всё, не нужно вызывать reset_page_text + reset_page_image + delete_page_button "
+                "по очереди."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"page_key": {"type": "string"}},
@@ -1272,6 +1297,18 @@ async def _update_page_image(page_key: str, image: Any) -> str:
             f"ОШИБКА update_page_image: image должен быть Telegram file_id "
             f"(длинный токен без пробелов) или URL (http(s)://...). Получено: {image_str[:60]!r}"
         )
+    # Защита от «выдуманных» file_id: они обычно начинаются с 'AgAC' (фото),
+    # 'BAAD' (документ), 'BQAD' (видео) и пр. в base64-like алфавите.
+    # Не блокируем жёстко (бывают и другие префиксы), но логируем подозрительные.
+    if is_file_id_like and not is_url:
+        # Грубая проверка: file_id состоит из base64 алфавита (A-Za-z0-9_-)
+        suspicious_chars = [c for c in image_str if not (c.isalnum() or c in "-_")]
+        if suspicious_chars:
+            return (
+                f"ОШИБКА update_page_image: image='{image_str[:60]}...' не похож на "
+                f"настоящий Telegram file_id (содержит {suspicious_chars[:3]}). "
+                f"Если админ не присылал фото — попроси его прислать."
+            )
 
     from database.db_pages import get_page, update_page_custom
     page_row = await asyncio.to_thread(get_page, page_key)
@@ -1291,6 +1328,46 @@ async def _update_page_image(page_key: str, image: Any) -> str:
     return (
         f"Картинка страницы '{page_key}' обновлена ({kind}). "
         "Изменения видны мгновенно — пользователь увидит её при следующем заходе."
+    )
+
+
+async def _reset_page(page_key: str) -> str:
+    """
+    Аварийный сброс ВСЕХ кастомных полей страницы: text_custom, image_custom,
+    buttons_custom → NULL. Рендер вернётся к дефолтам разработчика.
+    Используется когда что-то сломалось ('верни как было', 'отмени всё').
+    """
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА reset_page: не указан page_key"
+
+    from database.db_pages import get_page
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА reset_page: страница '{page_key}' не найдена"
+
+    # Используем прямой SQL, потому что update_page_custom не умеет писать NULL
+    # (он трактует None как «не менять» — это особенность сигнатуры).
+    from database.connection import get_db
+
+    def _do_reset():
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE pages SET text_custom = NULL, image_custom = NULL, "
+                "buttons_custom = NULL, updated_at = CURRENT_TIMESTAMP "
+                "WHERE page_key = ?",
+                (page_key,),
+            )
+
+    try:
+        await asyncio.to_thread(_do_reset)
+    except Exception as e:
+        return f"ОШИБКА reset_page: запись в БД не удалась: {e}"
+
+    logger.info("DeepSeek Agent tool: reset_page page_key=%s", page_key)
+    return (
+        f"Страница '{page_key}' полностью сброшена к дефолтам "
+        "(text, image и buttons custom очищены). Изменения видны мгновенно."
     )
 
 
@@ -1653,6 +1730,9 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     elif tool_name == "reset_page_image":
         return await _reset_page_image(str(arguments.get("page_key", "")).strip())
 
+    elif tool_name == "reset_page":
+        return await _reset_page(str(arguments.get("page_key", "")).strip())
+
     elif tool_name == "delete_page_button":
         page_key = str(arguments.get("page_key", "")).strip()
         button_id = str(arguments.get("button_id", "")).strip()
@@ -1800,6 +1880,7 @@ async def run_dialog(
                 "reset_page_text",
                 "update_page_image",
                 "reset_page_image",
+                "reset_page",
             )
         ]
     else:
@@ -1846,6 +1927,8 @@ async def run_dialog(
 
     modified_files: list[str] = []
     db_updated_pages: list[str] = []
+    # page_key → set действий: 'buttons', 'text', 'image' (для финального сообщения)
+    db_updates_summary: dict[str, set[str]] = {}
     max_tool_rounds = 10
     rounds_without_modify = 0
     EARLY_ABORT_AFTER = 4
@@ -1955,6 +2038,8 @@ async def run_dialog(
                     await _progress(f"🖼 Меняю картинку страницы '{page_hint}' ({kind})...")
                 elif tool_name == "reset_page_image":
                     await _progress(f"↩️ Сбрасываю картинку страницы '{page_hint}'...")
+                elif tool_name == "reset_page":
+                    await _progress(f"🆘 Аварийный сброс ВСЕЙ кастомизации страницы '{page_hint}'...")
                 elif tool_name == "delete_page_button":
                     bid = str(args.get("button_id", ""))
                     await _progress(f"❌ Скрываю кнопку '{bid}' на странице '{page_hint}'...")
@@ -1984,20 +2069,35 @@ async def run_dialog(
                             modified_files.append(resolved_path)
                         has_modify_this_round = True  # ТОЛЬКО после реального успеха
 
-                # Отслеживаем DB-обновления — отдельно от файлов, чтобы НЕ сработал auto-restart
-                _DB_WRITE_TOOLS = (
-                    "update_page_buttons",
-                    "delete_page_button",
-                    "add_page_button",
-                    "update_page_button",
-                    "update_page_text",
-                    "reset_page_text",
-                    "update_page_image",
-                    "reset_page_image",
-                )
-                if tool_name in _DB_WRITE_TOOLS and not result_text.startswith("ОШИБКА"):
+                # Отслеживаем DB-обновления — отдельно от файлов, чтобы НЕ сработал auto-restart.
+                # Группируем по типу действия — для информативного финального сообщения.
+                _DB_WRITE_TOOLS_BY_KIND = {
+                    "buttons": (
+                        "update_page_buttons",
+                        "delete_page_button",
+                        "add_page_button",
+                        "update_page_button",
+                    ),
+                    "text": ("update_page_text", "reset_page_text"),
+                    "image": ("update_page_image", "reset_page_image"),
+                }
+                # reset_page трогает всё — присвоим все три kind
+                if tool_name == "reset_page" and not result_text.startswith("ОШИБКА"):
+                    if page_hint:
+                        kinds = db_updates_summary.setdefault(page_hint, set())
+                        kinds.update({"buttons", "text", "image"})
+                _all_db_tools = {"reset_page"}
+                for tools_set in _DB_WRITE_TOOLS_BY_KIND.values():
+                    _all_db_tools.update(tools_set)
+
+                if tool_name in _all_db_tools and not result_text.startswith("ОШИБКА"):
                     if page_hint and page_hint not in db_updated_pages:
                         db_updated_pages.append(page_hint)
+                    if page_hint:
+                        kinds = db_updates_summary.setdefault(page_hint, set())
+                        for kind, tools_set in _DB_WRITE_TOOLS_BY_KIND.items():
+                            if tool_name in tools_set:
+                                kinds.add(kind)
                     has_modify_this_round = True
 
                 messages.append({
@@ -2012,13 +2112,29 @@ async def run_dialog(
             else:
                 rounds_without_modify += 1
 
-            # Если кнопки в БД обновлены — выходим сразу. modified_files оставляем пустым,
+            # Если в БД были изменения — выходим сразу. modified_files оставляем пустым,
             # чтобы handler НЕ перезапускал бота: страницы рендерятся из БД на лету.
             if db_updated_pages:
-                pages_list = ", ".join(f"'{p}'" for p in db_updated_pages)
+                # Собираем человеческий перечень действий по фактам.
+                # Раньше всегда писали «Кнопки обновлены», это вводило в заблуждение
+                # когда модель меняла, например, картинку.
+                _KIND_LABEL = {
+                    "buttons": "кнопки",
+                    "text": "текст",
+                    "image": "картинка",
+                }
+                parts: list[str] = []
+                for page in db_updated_pages:
+                    kinds = db_updates_summary.get(page) or set()
+                    if kinds:
+                        labels = ", ".join(_KIND_LABEL.get(k, k) for k in sorted(kinds))
+                        parts.append(f"'{page}' ({labels})")
+                    else:
+                        parts.append(f"'{page}'")
+                summary = ", ".join(parts)
                 return (
-                    f"✅ Кнопки страницы {pages_list} обновлены в БД. "
-                    f"Изменения видны мгновенно — отправь /start, чтобы их увидеть.",
+                    f"✅ Изменено в БД: {summary}. "
+                    f"Изменения видны мгновенно — открой /start чтобы проверить.",
                     modified_files,
                 )
 
