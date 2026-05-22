@@ -5,6 +5,7 @@
 - read_file_content       — чтение файлов бота
 - modify_file_content     — полная перезапись файла (только для новых)
 - patch_file_content      — точечная замена фрагмента в существующем файле
+- get_page_buttons        — чтение АКТУАЛЬНЫХ кнопок страницы из БД (мёрж default+custom)
 - update_page_buttons     — прямая запись кнопок страницы в БД (таблица pages, мгновенно)
 - restart_bot_process     — перезапуск systemd-службы (fire-and-forget)
 - execute_server_command  — диагностика сервера (allowlist + deny-list)
@@ -185,20 +186,31 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 ВАЖНО ПРО АРХИТЕКТУРУ КНОПОК:
 Главное меню (/start) и страница помощи рендерятся ИЗ БАЗЫ ДАННЫХ (таблица pages),
 а НЕ из bot/keyboards/user.py и НЕ из database/migrations.py. Файл user.py УСТАРЕЛ.
-Файл migrations.py содержит только ДЕФОЛТЫ (применяются один раз при первом запуске).
-Чтобы изменить кнопки на экране пользователя — пиши прямо в БД через update_page_buttons.
+Файл migrations.py содержит ТОЛЬКО ДЕФОЛТЫ — там НЕТ кнопок, которые админ добавлял
+ранее через /ai. Если ты прочитаешь migrations.py и передашь его список в
+update_page_buttons — ты ЗАТРЁШЬ все ранее добавленные кнопки. Это БАГ.
+ПРАВИЛЬНЫЙ источник текущих кнопок — get_page_buttons(page_key).
 
 ВЕТКА А: «кнопки страницы пользователя» (главное меню, help, любая страница из таблицы pages)
 АЛГОРИТМ — РОВНО 2 ШАГА:
-Шаг 1: read_file_content('database/migrations.py', max_lines=500).
-       Найди словарь page_defaults[<page_key>]['buttons'] — там JSON со списком существующих кнопок.
+Шаг 1: get_page_buttons(page_key=<ключ>).
+       Получи АКТУАЛЬНЫЙ список текущих кнопок из БД (мёрж default + custom). Это то,
+       что пользователь сейчас видит на экране.
 Шаг 2: update_page_buttons(page_key=<ключ>, buttons=[...]).
-       Передай ПОЛНЫЙ список: новые кнопки + ВСЕ существующие из migrations.py.
-       НЕ редактируй migrations.py через patch_file_content — это бесполезно (изменения не применятся без рестарта и миграции).
+       Передай ПОЛНЫЙ список: ВСЕ кнопки из Шага 1 + твои добавления/изменения.
+       Если задача «добавь кнопку X» — добавь X к списку из Шага 1, ничего не убирая.
+       Если задача «удали кнопку X» — убери из списка из Шага 1 только X, остальные оставь.
+       Если задача «замени X на Y» — замени только X.
+
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО в ВЕТКЕ А:
+- Вызывать read_file_content('database/migrations.py') для получения текущих кнопок.
+  Это даст ДЕФОЛТЫ, а не реальное состояние. Используй get_page_buttons.
+- Вызывать patch_file_content или modify_file_content для database/migrations.py.
+  Изменения не применятся (нужна миграция). Используй update_page_buttons.
 
 ГДЕ КАКОЙ page_key:
-- «главное меню» / «меню пользователя» / «под /start» / «здесь»  → page_key='main'
-- «страница помощи» / «справка» / «/help»                         → page_key='help'
+- «главное меню» / «меню пользователя» / «под /start» / «здесь» / «внизу к боту» → page_key='main'
+- «страница помощи» / «справка» / «/help»                                        → page_key='help'
 
 ФОРМАТ КНОПКИ:
 {
@@ -211,19 +223,12 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
   "is_hidden": false
 }
 
-ПРИМЕР update_page_buttons (добавить 2 url-кнопки в начало главного меню):
-1) Прочитал migrations.py, увидел в page_defaults['main']['buttons']:
-   - btn_my_keys (row=0,col=0), btn_buy_key (row=0,col=1),
-     btn_trial (row=1,col=0,hidden), btn_referral (row=2,col=0,hidden),
-     btn_help (row=2,col=1).
-2) Вызвал update_page_buttons(page_key='main', buttons=[
-     {"id":"btn_privacy","label":"📜 Политика","row":0,"col":0,"action_type":"url","action_value":"https://example.com/privacy","color":"secondary","is_hidden":false},
-     {"id":"btn_terms",  "label":"📋 Соглашение","row":0,"col":1,"action_type":"url","action_value":"https://example.com/terms","color":"secondary","is_hidden":false},
-     {"id":"btn_my_keys","label":"🔑 Мои ключи","row":1,"col":0,"action_type":"internal","action_value":"cmd_my_keys","color":"secondary","is_hidden":false},
-     {"id":"btn_buy_key","label":"💳 Купить ключ","row":1,"col":1,"action_type":"internal","action_value":"cmd_buy","color":"secondary","is_hidden":false},
-     {"id":"btn_trial",  "label":"🎁 Пробная подписка","row":2,"col":0,"action_type":"internal","action_value":"cmd_trial","color":"secondary","is_hidden":true},
-     {"id":"btn_referral","label":"🔗 Реферальная ссылка","row":3,"col":0,"action_type":"internal","action_value":"cmd_referral","color":"secondary","is_hidden":true},
-     {"id":"btn_help",   "label":"❓ Справка","row":3,"col":1,"action_type":"internal","action_value":"cmd_help","color":"secondary","is_hidden":false}
+ПРИМЕР (задача «добавь кнопку Тест https://example.com в конец главного меню»):
+1) Вызвал get_page_buttons('main') — получил 7 кнопок (например, дефолтные + добавленные ранее btn_privacy, btn_terms).
+2) Вычислил max(row) среди них (например, 3) → новая кнопка пойдёт на row=4.
+3) Вызвал update_page_buttons('main', buttons=[
+     <... все 7 кнопок из Шага 1 БЕЗ ИЗМЕНЕНИЙ ...>,
+     {"id":"btn_test","label":"🧪 Тест","row":4,"col":0,"action_type":"url","action_value":"https://example.com","color":"secondary","is_hidden":false}
    ])
 
 ВЕТКА Б: «кнопки админ-панели» или «другой Python-код»
@@ -249,22 +254,28 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 1. **read_file_content** — читать файлы исходного кода бота
 2. **patch_file_content** — точечно заменять фрагмент кода (не требует перезаписи всего файла)
 3. **modify_file_content** — перезаписывать файл целиком (только для НОВЫХ файлов)
-4. **update_page_buttons** — НАПРЯМУЮ записать кнопки страницы в БД (page_key + полный список кнопок). ИЗМЕНЕНИЯ ВИДНЫ МГНОВЕННО, перезапуск не нужен.
-5. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
-6. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps и др.)
+4. **get_page_buttons** — прочитать АКТУАЛЬНЫЕ кнопки страницы из БД (мёрж default + custom)
+5. **update_page_buttons** — НАПРЯМУЮ записать кнопки страницы в БД (page_key + полный список кнопок). ИЗМЕНЕНИЯ ВИДНЫ МГНОВЕННО, перезапуск не нужен.
+6. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
+7. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps и др.)
 
 АРХИТЕКТУРА КНОПОК (ВАЖНО):
 - Главное меню (/start), страница помощи и пр. рендерятся из БД (таблица pages), а НЕ из bot/keyboards/user.py.
 - Файл bot/keyboards/user.py и функция main_menu_kb() УСТАРЕЛИ — НЕ редактируй их для главного меню.
-- database/migrations.py содержит только ДЕФОЛТНЫЕ кнопки (page_defaults). Прямые правки в нём НЕ применяются без рестарта и миграции — для изменений на лету используй update_page_buttons.
+- database/migrations.py содержит ТОЛЬКО ДЕФОЛТНЫЕ кнопки и НЕ показывает то, что админ добавлял через /ai. Никогда не используй его как источник «текущих кнопок».
+- Источник истины для текущих кнопок — get_page_buttons(page_key).
 
 Правила диалогового режима:
 - Если задача непонятна — задай ОДИН уточняющий вопрос и жди ответа.
 - Если задача ясна — сразу выполняй через инструменты, не переспрашивай.
 - ДЛЯ КНОПОК ГЛАВНОГО МЕНЮ И ДРУГИХ СТРАНИЦ pages:
-  1) read_file_content('database/migrations.py') — посмотри текущие кнопки в page_defaults[page_key]['buttons'].
-  2) update_page_buttons(page_key='main' или 'help', buttons=[...]) — передай ПОЛНЫЙ список (новые + существующие).
-  page_key='main' = главное меню, page_key='help' = справка.
+  1) get_page_buttons(page_key='main' или 'help') — получи АКТУАЛЬНЫЙ список того, что сейчас на экране.
+  2) update_page_buttons(page_key, buttons=[...]) — передай ВСЕ кнопки из шага 1 + твои изменения. Не теряй существующие!
+  Семантика задач:
+   • «добавь X» → возьми список из get_page_buttons и допиши X (новый row).
+   • «удали X» → возьми список и убери только X, остальные оставь.
+   • «замени X на Y» → замени только X.
+  ЗАПРЕЩЕНО для этой задачи читать database/migrations.py — там устаревшие дефолты.
 - Для других правок кода: read_file_content → patch_file_content (скопируй фрагмент ОДИН-В-ОДИН как search).
 - Для нового файла используй modify_file_content.
 - Админ-панель: bot/keyboards/admin_misc.py → admin_main_menu_kb().
@@ -343,6 +354,30 @@ TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["path", "search", "replace"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_page_buttons",
+            "description": (
+                "Возвращает АКТУАЛЬНЫЙ список кнопок страницы из БД — РОВНО ТО, что сейчас "
+                "видит пользователь на экране (мёрж buttons_default + buttons_custom). "
+                "ОБЯЗАТЕЛЬНО вызывай ЭТО перед update_page_buttons, чтобы не затереть "
+                "кнопки, ранее добавленные админом. "
+                "НЕ читай для этой задачи database/migrations.py через read_file_content — "
+                "там только дефолты, без последних правок админа."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_key": {
+                        "type": "string",
+                        "description": "Ключ страницы: 'main' = главное меню /start, 'help' = справка.",
+                    },
+                },
+                "required": ["page_key"],
             },
         },
     },
@@ -557,6 +592,49 @@ async def _patch_file_content(path: str, search: str, replace: str) -> str:
 
 _REQUIRED_BUTTON_FIELDS = ("id", "label", "row", "col", "action_type", "action_value")
 _ALLOWED_ACTION_TYPES = {"internal", "url", "system"}
+
+
+async def _get_page_buttons(page_key: str) -> str:
+    """
+    Возвращает АКТУАЛЬНЫЙ итоговый список кнопок страницы (default + custom merged).
+
+    Это то, что пользователь сейчас видит на экране. Используется моделью ПЕРЕД
+    update_page_buttons, чтобы не потерять ранее добавленные админом кастомные кнопки.
+    """
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА get_page_buttons: не указан page_key"
+
+    try:
+        from bot.utils.page_renderer import get_page_data
+    except Exception as e:
+        return f"ОШИБКА get_page_buttons: не удалось импортировать page_renderer: {e}"
+
+    try:
+        data = await asyncio.to_thread(get_page_data, page_key)
+    except Exception as e:
+        return f"ОШИБКА get_page_buttons: чтение БД не удалось: {e}"
+
+    if not data:
+        return (
+            f"ОШИБКА get_page_buttons: страница с page_key={page_key!r} не найдена в таблице pages."
+        )
+
+    buttons = data.get("buttons", []) or []
+
+    logger.info(
+        "DeepSeek Agent tool: get_page_buttons page_key=%s buttons=%d",
+        page_key,
+        len(buttons),
+    )
+
+    return (
+        f"=== Актуальные кнопки страницы '{page_key}' (всего {len(buttons)} шт.) ===\n"
+        f"Это то, что СЕЙЧАС видит пользователь (мёрж default + custom).\n"
+        f"При вызове update_page_buttons передай этот список ПОЛНОСТЬЮ + свои изменения.\n\n"
+        f"{json.dumps(buttons, ensure_ascii=False, indent=2)}\n"
+        f"=== КОНЕЦ ==="
+    )
 
 
 def _normalize_button(btn: Any, idx: int) -> dict:
@@ -797,6 +875,12 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
             return "ОШИБКА: не указан search для patch_file_content. Скопируй уникальный фрагмент из read_file_content."
         return await _patch_file_content(path, search, replace)
 
+    elif tool_name == "get_page_buttons":
+        page_key = str(arguments.get("page_key", "")).strip()
+        if not page_key:
+            return "ОШИБКА: не указан page_key для get_page_buttons"
+        return await _get_page_buttons(page_key)
+
     elif tool_name == "update_page_buttons":
         page_key = str(arguments.get("page_key", "")).strip()
         buttons = arguments.get("buttons")
@@ -883,12 +967,13 @@ async def run_dialog(
         active_tools = [t for t in TOOLS if t["function"]["name"] != "execute_server_command"]
     elif is_diag and not is_code:
         # В diag-режиме: read, execute_server_command
-        # НЕ даём modify_file_content, patch_file_content, update_page_buttons
+        # НЕ даём modify_file_content, patch_file_content, update_page_buttons, get_page_buttons
         active_tools = [
             t for t in TOOLS
             if t["function"]["name"] not in (
                 "modify_file_content",
                 "patch_file_content",
+                "get_page_buttons",
                 "update_page_buttons",
             )
         ]
@@ -912,11 +997,12 @@ async def run_dialog(
             messages.append({
                 "role": "system",
                 "content": (
-                    "ТЫ УЖЕ ПРОЧИТАЛ ФАЙЛ. НЕМЕДЛЕННО ВЫЗОВИ ИНСТРУМЕНТ ЗАПИСИ.\n"
-                    "- Если задача про кнопки страниц (главное меню, help и т.п.) — "
-                    "ВЫЗОВИ update_page_buttons с page_key и ПОЛНЫМ списком кнопок "
-                    "(новые + все существующие из database/migrations.py). "
-                    "НЕ редактируй migrations.py через patch_file_content для этого.\n"
+                    "ТЫ УЖЕ ПРОЧИТАЛ ДАННЫЕ. НЕМЕДЛЕННО ВЫЗОВИ ИНСТРУМЕНТ ЗАПИСИ.\n"
+                    "- Если задача про кнопки страниц (главное меню, help и т.п.):\n"
+                    "  1) Если ещё не вызвал get_page_buttons(page_key) — вызови ПРЯМО СЕЙЧАС.\n"
+                    "  2) Затем update_page_buttons с ПОЛНЫМ списком (все кнопки из get_page_buttons + твои изменения).\n"
+                    "  НЕ читай database/migrations.py — там устаревшие дефолты, использование затрёт правки админа.\n"
+                    "  НЕ редактируй migrations.py через patch_file_content.\n"
                     "- Если задача про другой код — ВЫЗОВИ patch_file_content. "
                     "Скопируй уникальный фрагмент из read_file_content как search, "
                     "напиши замену как replace.\n"
@@ -995,6 +1081,8 @@ async def run_dialog(
                     await _progress(f"✏️ Перезаписываю {path_hint}...")
                 elif tool_name == "patch_file_content":
                     await _progress(f"🔧 Патчу {path_hint}...")
+                elif tool_name == "get_page_buttons":
+                    await _progress(f"🔍 Читаю актуальные кнопки страницы '{page_hint}' из БД...")
                 elif tool_name == "update_page_buttons":
                     btns = args.get("buttons")
                     btn_count = len(btns) if isinstance(btns, list) else "?"
