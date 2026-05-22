@@ -178,15 +178,32 @@ SYSTEM_PROMPT_EXEC = """Ты — автономный ИИ-администра�
 
 === РЕЖИМ «КОД» (задача про кнопки/файлы/код) ===
 АЛГОРИТМ — РОВНО 2 ШАГА:
-Шаг 1: read_file_content. НЕ читай другие файлы.
-Шаг 2: modify_file_content с ПОЛНЫМ новым содержимым. Добавляй кнопки в начало тела функции.
-ВСЁ. НИКАКИХ ДРУГИХ ИНСТРУМЕНТОВ. НЕ вызывай execute_server_command в режиме «код».
+Шаг 1: read_file_content. Прочитай ТОЛЬКО нужный файл (не больше одного).
+Шаг 2: patch_file_content для точечной правки. Скопируй фрагмент ОДИН-В-ОДИН из результата Шага 1 как search. Добавь новые кнопки/строки в replace.
+ВСЁ. НИКАКИХ ДРУГИХ ИНСТРУМЕНТОВ. НЕ вызывай execute_server_command. НЕ используй modify_file_content для существующих файлов.
+
+ПРИМЕР patch_file_content (добавить 2 кнопки в меню):
+search = фрагмент из read_file_content, например:
+  "builder.row(
+      InlineKeyboardButton(text=\"🔑 Мои ключи\", callback_data=\"my_keys\"),
+      InlineKeyboardButton(text=\"💳 Купить ключ\", callback_data=\"buy_key\")
+  )"
+replace = тот же фрагмент + новые кнопки ПЕРЕД ним:
+  "builder.row(
+      InlineKeyboardButton(text=\"📜 Политика\", callback_data=\"privacy_policy\"),
+      InlineKeyboardButton(text=\"📋 Соглашение\", callback_data=\"terms_of_service\")
+  )
+  builder.row(
+      InlineKeyboardButton(text=\"🔑 Мои ключи\", callback_data=\"my_keys\"),
+      InlineKeyboardButton(text=\"💳 Купить ключ\", callback_data=\"buy_key\")
+  )"
 
 ГДЕ ЧТО:
 - «Главное меню» / «здесь» / «меню пользователя» / «под /start» / «в этом меню»:
   → bot/keyboards/user.py → функция main_menu_kb() (вставь кнопки после builder = InlineKeyboardBuilder())
 - «Админ-панель» / «меню администратора» / «меню админки»:
   → bot/keyboards/admin_misc.py → admin_main_menu_kb()
+- Новый файл (не существует) → используй modify_file_content
 
 === РЕЖИМ «ДИАГНОСТИКА» (задача про сервер/логи/сеть/диски) ===
 execute_server_command: free -h, df -h, uptime, ps aux --sort=-%mem | head -10, journalctl, ip addr, ss -tlnp, lsblk
@@ -199,15 +216,16 @@ SYSTEM_PROMPT_DIALOG = """Ты — ИИ-администратор VPN-бота 
 
 Доступные инструменты:
 1. **read_file_content** — читать файлы исходного кода бота
-2. **modify_file_content** — перезаписывать / править файлы кода (ПОЛНОСТЬЮ весь файл)
-3. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
-4. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps и др.)
+2. **patch_file_content** — точечно заменять фрагмент кода (не требует перезаписи всего файла)
+3. **modify_file_content** — перезаписывать файл целиком (только для НОВЫХ файлов)
+4. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам — администратор перезапустит)
+5. **execute_server_command** — выполнить диагностическую команду на сервере (free, df, uptime, ps, top, journalctl, ss, docker ps и др.)
 
 Правила диалогового режима:
 - Если задача непонятна — задай ОДИН уточняющий вопрос и жди ответа.
 - Если задача ясна — сразу выполняй через инструменты, не переспрашивай.
-- Перед изменением файла всегда сначала прочитай его через read_file_content.
-- При изменении кода возвращай ПОЛНОЕ содержимое файла.
+- Перед изменением существующего файла: read_file_content → patch_file_content (скопируй фрагмент ОДИН-В-ОДИН как search).
+- Для нового файла используй modify_file_content.
 - Кнопки главного меню: bot/keyboards/admin_misc.py (admin_main_menu_kb).
 - Пользовательские кнопки: bot/keyboards/user.py.
 - Обработчики: bot/handlers/.
@@ -246,7 +264,7 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "modify_file_content",
-            "description": "Полностью перезаписывает содержимое файла. Внимание: передавай ПОЛНОЕ новое содержимое файла, а не только изменённые строки.",
+            "description": "Полностью перезаписывает содержимое файла. Используй ТОЛЬКО для создания НОВЫХ файлов. Для точечных правок существующих файлов используй patch_file_content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -260,6 +278,31 @@ TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_file_content",
+            "description": "Точечно заменяет фрагмент кода в файле. Ищет точное совпадение search и заменяет на replace. Используй для добавления кнопок, изменения функций, небольших правок. НЕ требует перезаписывать весь файл. Алгоритм: сначала read_file_content, затем скопируй уникальный фрагмент из прочитанного как search, напиши замену как replace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Путь к файлу относительно корня проекта, например 'bot/keyboards/user.py'",
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Точный фрагмент кода (3-10 строк), который нужно найти и заменить. Копируй ОДИН-В-ОДИН из результата read_file_content — те же отступы, те же переносы строк. Фрагмент должен быть УНИКАЛЬНЫМ в файле.",
+                    },
+                    "replace": {
+                        "type": "string",
+                        "description": "Новый код для замены найденного фрагмента. Например, тот же код + новые кнопки перед ним или после него.",
+                    },
+                },
+                "required": ["path", "search", "replace"],
             },
         },
     },
@@ -330,7 +373,7 @@ async def _read_file_content(path: str, max_lines: int = 2000) -> str:
 
 
 async def _modify_file_content(path: str, content: str) -> str:
-    """Перезаписывает файл полностью."""
+    """Перезаписывает файл полностью (для создания новых файлов)."""
     resolved = _resolve_tool_path(path)
 
     try:
@@ -344,6 +387,78 @@ async def _modify_file_content(path: str, content: str) -> str:
         return f"Файл {path} успешно перезаписан ({len(content)} байт)."
     except Exception as e:
         return f"ОШИБКА записи {resolved}: {e}"
+
+
+async def _patch_file_content(path: str, search: str, replace: str) -> str:
+    """
+    Точечная замена фрагмента кода в файле.
+    
+    Ищет точное совпадение search и заменяет его на replace.
+    Нормализует переводы строк (\\r\\n -> \\n) для кроссплатформенности.
+    Возвращает ошибку, если фрагмент не найден или найден более одного раза.
+    """
+    resolved = _resolve_tool_path(path)
+    
+    if not resolved.is_file():
+        return f"ОШИБКА: файл не найден — {resolved}"
+    
+    # Нормализуем переводы строк для кроссплатформенности
+    search_normalized = search.replace("\r\n", "\n")
+    replace_normalized = replace.replace("\r\n", "\n")
+    
+    try:
+        original_content = await asyncio.to_thread(resolved.read_text, encoding="utf-8")
+        content_normalized = original_content.replace("\r\n", "\n")
+        
+        # Проверяем, что search встречается ровно один раз
+        count = content_normalized.count(search_normalized)
+        if count == 0:
+            # Пытаемся найти с \t как пробелами и наоборот (помощь модели)
+            return (
+                f"ОШИБКА patch_file_content: указанный фрагмент НЕ НАЙДЕН в {path}.\n"
+                f"Возможные причины:\n"
+                f"- Не совпадают отступы (табы vs пробелы). Скопируй фрагмент ТОЧНО из read_file_content.\n"
+                f"- Фрагмент не уникален или искажён.\n"
+                f"СОВЕТ: прочитай файл ещё раз через read_file_content с max_lines побольше "
+                f"и скопируй нужный фрагмент ОДИН-В-ОДИН как search."
+            )
+        elif count > 1:
+            # Показываем контекст для каждого вхождения
+            lines_info = []
+            for idx, _ in enumerate(range(count)):
+                pos = content_normalized.index(search_normalized)
+                line_num = content_normalized[:pos].count("\n") + 1
+                snippet = search_normalized[:60].replace("\n", "\\n")
+                lines_info.append(f"  строка ~{line_num}: ...{snippet}...")
+                content_normalized = content_normalized.replace(
+                    search_normalized, "<<<FOUND>>>", 1
+                )
+            return (
+                f"ОШИБКА patch_file_content: фрагмент найден {count} раз(а) в {path}.\n"
+                f"Фрагмент должен быть УНИКАЛЬНЫМ. Найден на строках:\n"
+                + "\n".join(lines_info[:5]) +
+                "\nСОВЕТ: добавь больше контекстных строк в search, чтобы сделать его уникальным."
+            )
+        
+        # Восстанавливаем нормализованный контент для замены
+        content_normalized = original_content.replace("\r\n", "\n")
+        new_content = content_normalized.replace(search_normalized, replace_normalized, 1)
+        
+        await asyncio.to_thread(resolved.write_text, new_content, encoding="utf-8")
+        
+        logger.info(
+            "DeepSeek Agent tool: patch_file_content path=%s search_len=%d replace_len=%d",
+            resolved,
+            len(search_normalized),
+            len(replace_normalized),
+        )
+        
+        return (
+            f"Файл {path} успешно изменён (patch).\n"
+            f"Заменено {len(search_normalized)} -> {len(replace_normalized)} символов."
+        )
+    except Exception as e:
+        return f"ОШИБКА patch_file_content {resolved}: {e}"
 
 
 async def _restart_bot_process(service_name: str = "yadreno-vpn") -> str:
@@ -442,10 +557,15 @@ async def _execute_server_command(command: str) -> str:
 
 async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     """Диспетчер: исполняет tool_call и возвращает строку-результат."""
+    # Логируем аргументы: скрываем content (слишком длинный), но показываем search/replace
+    log_args = {
+        k: (v[:100] + "..." if isinstance(v, str) and len(v) > 100 else v)
+        for k, v in arguments.items()
+    }
     logger.info(
         "DeepSeek Agent tool_call: tool=%s args=%s",
         tool_name,
-        {k: v for k, v in arguments.items() if k != "content"},
+        log_args,
     )
 
     if tool_name == "read_file_content":
@@ -461,6 +581,16 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
         if not path:
             return "ОШИБКА: не указан path для modify_file_content"
         return await _modify_file_content(path, content)
+
+    elif tool_name == "patch_file_content":
+        path = str(arguments.get("path", "")).strip()
+        search = str(arguments.get("search", ""))
+        replace = str(arguments.get("replace", ""))
+        if not path:
+            return "ОШИБКА: не указан path для patch_file_content"
+        if not search:
+            return "ОШИБКА: не указан search для patch_file_content. Скопируй уникальный фрагмент из read_file_content."
+        return await _patch_file_content(path, search, replace)
 
     elif tool_name == "restart_bot_process":
         service_name = str(arguments.get("service_name", "yadreno-vpn")).strip()
@@ -525,7 +655,8 @@ async def run_dialog(
     CODE_KW = ("кнопк", "добав", "меню", "измен", "файл", "код", "исправ",
                "перепиш", "сделай", "создай", "удали", "поправ", "прав",
                "убери", "замени", "переименуй", "отредактируй", "напиши",
-               "запиши", "вставь", "перемести")
+               "запиши", "вставь", "перемести", "картинк", "изображен",
+               "текст", "ссылк", "команд")
     DIAG_KW = ("сервер", "лог", "состоян", "покаж", "провер", "статус",
                "диск", "память", "ram", "cpu", "процесс", "порт", "сет",
                "ip", "трафик", "нагрузк", "место", "свободно", "занято",
@@ -533,9 +664,13 @@ async def run_dialog(
     is_code = any(kw in msg_lower for kw in CODE_KW)
     is_diag = any(kw in msg_lower for kw in DIAG_KW)
     if is_code and not is_diag:
+        # В code-режиме оставляем read, patch, modify (для новых файлов), restart
+        # НЕ даём execute_server_command
         active_tools = [t for t in TOOLS if t["function"]["name"] != "execute_server_command"]
     elif is_diag and not is_code:
-        active_tools = [t for t in TOOLS if t["function"]["name"] != "modify_file_content"]
+        # В diag-режиме оставляем read, execute_server_command
+        # НЕ даём modify_file_content и patch_file_content
+        active_tools = [t for t in TOOLS if t["function"]["name"] not in ("modify_file_content", "patch_file_content")]
     else:
         active_tools = TOOLS
 
@@ -550,14 +685,16 @@ async def run_dialog(
     EARLY_ABORT_AFTER = 4
 
     for _round in range(max_tool_rounds):
-        # Ранний abort или forced modify
+        # Ранний abort или forced modify / forced patch
         if rounds_without_modify == 2:
             messages.append({
                 "role": "system",
                 "content": (
-                    "ТЫ УЖЕ ПРОЧИТАЛ ФАЙЛ. НЕМЕДЛЕННО ВЫЗОВИ modify_file_content. "
-                    "Добавь кнопки в первую функцию клавиатуры. НЕ читай другие файлы. "
-                    "НЕ вызывай execute_server_command. ТОЛЬКО modify_file_content."
+                    "ТЫ УЖЕ ПРОЧИТАЛ ФАЙЛ. НЕМЕДЛЕННО ВЫЗОВИ patch_file_content. "
+                    "Скопируй уникальный фрагмент из результата read_file_content как search, "
+                    "напиши замену с новыми кнопками как replace. "
+                    "НЕ читай другие файлы. НЕ вызывай execute_server_command. "
+                    "ТОЛЬКО patch_file_content СЕЙЧАС."
                 ),
             })
         elif rounds_without_modify >= EARLY_ABORT_AFTER:
@@ -628,7 +765,9 @@ async def run_dialog(
                 if tool_name == "read_file_content":
                     await _progress(f"📖 Читаю {path_hint}...")
                 elif tool_name == "modify_file_content":
-                    await _progress(f"✏️ Изменяю {path_hint}...")
+                    await _progress(f"✏️ Перезаписываю {path_hint}...")
+                elif tool_name == "patch_file_content":
+                    await _progress(f"🔧 Патчу {path_hint}...")
                 elif tool_name == "restart_bot_process":
                     await _progress("⚠️ Перезапуск отложен (сделаю после ответа)")
                 elif tool_name == "execute_server_command":
@@ -636,8 +775,8 @@ async def run_dialog(
 
                 result_text = await _execute_tool_call(tool_name, args)
 
-                # Отслеживаем изменённые файлы и успешность modify
-                if tool_name == "modify_file_content" and not result_text.startswith("ОШИБКА"):
+                # Отслеживаем изменённые файлы и успешность modify/patch
+                if tool_name in ("modify_file_content", "patch_file_content") and not result_text.startswith("ОШИБКА"):
                     resolved_path = str(args.get("path", ""))
                     if resolved_path:
                         if resolved_path not in modified_files:
