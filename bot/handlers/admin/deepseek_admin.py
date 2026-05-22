@@ -181,43 +181,16 @@ async def ai_command(message: Message, state: FSMContext, command: CommandObject
     task = (command.args or "").strip()
 
     if task:
-        # Режим исполнения: FSM + progress + авто-перезапуск
+        # Режим исполнения: FSM + progress + авто-перезапуск.
+        # _run_agent сам читает контекст экрана и pending_image_file_id.
         await state.set_state(AdminStates.deepseek_chat)
-
-        # Читаем контекст экрана: какую page-страницу админ смотрел последней.
-        # render_page() автоматически пишет её в page_context при каждом рендере для админа.
-        ctx = get_page_context(message.from_user.id)
-        current_page_key = ctx.page_key if ctx else None
-
-        intro = "🤖 <b>DeepSeek AI</b>\n\n⏳ Анализирую задачу..."
-        if current_page_key:
-            intro += f"\n<i>🖼 контекст: {escape_html(current_page_key)}</i>"
-
-        thinking = await safe_edit_or_send(message, intro, force_new=True)
-
-        progress = _make_progress(thinking)
-        try:
-            final, modified_files = await run_dialog(
-                task,
-                system_prompt=SYSTEM_PROMPT_EXEC,
-                progress_callback=progress,
-                current_page_key=current_page_key,
-            )
-            # Показываем ответ
-            await safe_edit_or_send(
-                thinking,
-                f"🤖 <b>DeepSeek AI</b>\n\n{final}",
-                reply_markup=deepseek_admin_chat_kb(),
-            )
-            # Авто-перезапуск если были изменения
-            if modified_files:
-                await _auto_restart_if_needed(modified_files, thinking)
-        except DeepSeekAgentError as e:
-            await safe_edit_or_send(
-                thinking,
-                f"🤖 <b>DeepSeek AI</b>\n\n❌ Ошибка: {escape_html(str(e))}",
-                reply_markup=deepseek_admin_chat_kb(),
-            )
+        await _run_agent(
+            message,
+            state,
+            task,
+            system_prompt=SYSTEM_PROMPT_EXEC,
+            thinking_verb="Анализирую задачу",
+        )
         return
 
     # Без задачи — просто входим в режим диалога
@@ -251,43 +224,44 @@ async def cancel_dialog(message: Message, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Сообщения в режиме диалога
 # ---------------------------------------------------------------------------
-@router.message(AdminStates.deepseek_chat, F.text, ~F.text.startswith('/'))
-async def handle_chat_message(message: Message):
-    """Отправляет сообщение администратора DeepSeek AI и показывает ответ."""
-    if not _is_ai_admin(message.from_user.id):
-        return
-
-    if not DEEPSEEK_API_KEY:
-        await safe_edit_or_send(
-            message,
-            "🤖 <b>DeepSeek AI Agent</b>\n\n"
-            "❌ <b>DEEPSEEK_API_KEY не задан.</b>",
-            reply_markup=deepseek_admin_no_key_kb(),
-            force_new=True,
-        )
-        return
-
-    text = message.text.strip() if message.text else ""
-    if not text:
-        return
-
-    # Контекст: какую страницу админ смотрел последней (для «здесь / сюда»)
+async def _run_agent(
+    message: Message,
+    state: FSMContext,
+    task_text: str,
+    system_prompt: str = SYSTEM_PROMPT_DIALOG,
+    thinking_verb: str = "Думаю",
+) -> None:
+    """
+    Универсальный запуск агента из любого хендлера.
+    Достаёт контекст экрана и pending_image_file_id из FSM, запускает run_dialog,
+    показывает прогресс/результат, при изменениях файлов вызывает рестарт.
+    """
     ctx = get_page_context(message.from_user.id)
     current_page_key = ctx.page_key if ctx else None
 
-    intro = "🤖 <b>DeepSeek AI</b>\n\n⏳ Думаю..."
+    # Достаём pending image (если был прислан раньше) и сразу очищаем — одна задача.
+    data = await state.get_data()
+    pending_image = data.get("pending_image_file_id")
+    if pending_image:
+        await state.update_data(pending_image_file_id=None)
+
+    intro_lines = ["🤖 <b>DeepSeek AI</b>", "", f"⏳ {thinking_verb}..."]
     if current_page_key:
-        intro += f"\n<i>🖼 контекст: {escape_html(current_page_key)}</i>"
+        intro_lines.append(f"<i>🖼 контекст: {escape_html(current_page_key)}</i>")
+    if pending_image:
+        intro_lines.append("<i>📸 + прикреплённое фото</i>")
+    intro = "\n".join(intro_lines)
 
     thinking = await safe_edit_or_send(message, intro, force_new=True)
 
     progress = _make_progress(thinking)
     try:
         final, modified_files = await run_dialog(
-            text,
-            system_prompt=SYSTEM_PROMPT_DIALOG,
+            task_text,
+            system_prompt=system_prompt,
             progress_callback=progress,
             current_page_key=current_page_key,
+            pending_image_file_id=pending_image,
         )
         await safe_edit_or_send(
             thinking,
@@ -301,4 +275,72 @@ async def handle_chat_message(message: Message):
             thinking,
             f"🤖 <b>DeepSeek AI</b>\n\n❌ Ошибка: {escape_html(str(e))}",
             reply_markup=deepseek_admin_chat_kb(),
+        )
+
+
+@router.message(AdminStates.deepseek_chat, F.text, ~F.text.startswith('/'))
+async def handle_chat_message(message: Message, state: FSMContext):
+    """Отправляет текстовое сообщение администратора DeepSeek AI."""
+    if not _is_ai_admin(message.from_user.id):
+        return
+
+    if not DEEPSEEK_API_KEY:
+        await safe_edit_or_send(
+            message,
+            "🤖 <b>DeepSeek AI Agent</b>\n\n"
+            "❌ <b>DEEPSEEK_API_KEY не задан.</b>",
+            reply_markup=deepseek_admin_no_key_kb(),
+            force_new=True,
+        )
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    await _run_agent(message, state, text)
+
+
+@router.message(AdminStates.deepseek_chat, F.photo)
+async def handle_chat_photo(message: Message, state: FSMContext):
+    """
+    Обработка фото в /ai-диалоге.
+    - С подписью (caption): подпись = задача, file_id передаётся в run_dialog.
+    - Без подписи: сохраняем file_id в FSM и просим админа сказать что делать.
+    """
+    if not _is_ai_admin(message.from_user.id):
+        return
+
+    if not DEEPSEEK_API_KEY:
+        return
+
+    # Берём максимальное разрешение присланной фотографии
+    if not message.photo:
+        return
+    file_id = message.photo[-1].file_id
+    caption = (message.caption or "").strip()
+
+    if caption:
+        # Фото с подписью — обрабатываем как обычную задачу с file_id в контексте.
+        # Сохраняем file_id в FSM, _run_agent его достанет и передаст в run_dialog.
+        await state.update_data(pending_image_file_id=file_id)
+        await _run_agent(message, state, caption)
+    else:
+        # Только фото — сохраняем и просим инструкцию.
+        await state.update_data(pending_image_file_id=file_id)
+        ctx = get_page_context(message.from_user.id)
+        hint = ""
+        if ctx:
+            hint = (
+                f"\n\n<i>Подсказка: ты сейчас на странице "
+                f"'{escape_html(ctx.page_key)}'. Можно просто написать «поставь сюда».</i>"
+            )
+        await message.answer(
+            "📸 <b>Фото получено.</b>\n\n"
+            "Напиши, что с ним сделать, например:\n"
+            "• «поставь сюда»\n"
+            "• «поставь на главную»\n"
+            "• «поставь на справку»\n"
+            "• «замени картинку на пробной странице»"
+            + hint,
         )

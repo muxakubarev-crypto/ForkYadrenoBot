@@ -5,11 +5,14 @@
 - read_file_content       — чтение файлов бота
 - modify_file_content     — полная перезапись файла (только для новых)
 - patch_file_content      — точечная замена фрагмента в существующем файле
-- get_page_buttons        — чтение АКТУАЛЬНЫХ кнопок страницы (visible+hidden раздельно)
+- get_page_buttons        — кнопки страницы (visible+hidden раздельно)
+- get_page_content        — текст+картинка+счётчик кнопок страницы
 - delete_page_button      — атомарно скрыть/удалить одну кнопку
 - add_page_button         — атомарно добавить или вернуть одну кнопку
 - update_page_button      — атомарно изменить поля одной кнопки
-- update_page_buttons     — массовая перезапись списка кнопок страницы (редко)
+- update_page_buttons     — массовая перезапись списка кнопок (редко)
+- update_page_text / reset_page_text   — текст страницы
+- update_page_image / reset_page_image — картинка страницы (file_id или URL)
 - restart_bot_process     — перезапуск systemd-службы (fire-and-forget)
 - execute_server_command  — диагностика сервера (allowlist + deny-list)
 
@@ -265,6 +268,22 @@ update_page_buttons — ты ЗАТРЁШЬ все ранее добавленн
 1) get_page_buttons('help') → btn_support в «Скрытые».
 2) update_page_button('help', button_id='btn_support', is_hidden=False)
 
+=== ТЕКСТ И КАРТИНКИ СТРАНИЦ ===
+Аналогично кнопкам — отдельные tools для каждой операции:
+• «измени/перепиши текст» → update_page_text(page_key, text='новый HTML-текст')
+• «сбрось/верни дефолтный текст» → reset_page_text(page_key)
+• «поставь картинку», «обнови фото» → update_page_image(page_key, image='<file_id или URL>')
+  ВАЖНО: если в [CONTEXT] есть pending_image_file_id — используй именно его (админ только
+  что прислал фото). Не выдумывай file_id.
+• «убери картинку» → reset_page_image(page_key)
+• «что сейчас на странице» / нужно понять состояние → get_page_content(page_key)
+
+ПРИМЕР 5 — «поставь сюда эту картинку» (контекст: current_page_key='main', pending_image_file_id='AgACAg...'):
+1) update_page_image('main', image='AgACAg...')   # используешь file_id из [CONTEXT]
+
+ПРИМЕР 6 — «измени текст справки на ...»:
+1) update_page_text('help', text='<b>Помощь</b>\n\nНовый текст...')
+
 ВЕТКА Б: «кнопки админ-панели» или «другой Python-код»
 АЛГОРИТМ — РОВНО 2 ШАГА:
 Шаг 1: read_file_content нужного файла (только одного).
@@ -293,15 +312,18 @@ current_page_key как default. Если контекста нет и стра�
 
 Доступные инструменты:
 1. **read_file_content** — читать файлы исходного кода бота
-2. **patch_file_content** — точечно заменять фрагмент кода (не требует перезаписи всего файла)
+2. **patch_file_content** — точечно заменять фрагмент кода
 3. **modify_file_content** — перезаписывать файл целиком (только для НОВЫХ файлов)
-4. **get_page_buttons** — прочитать АКТУАЛЬНЫЕ кнопки страницы (вывод делит их на видимые/скрытые)
-5. **delete_page_button** — атомарно скрыть/удалить ОДНУ кнопку (предпочитай для «удали X»)
-6. **add_page_button** — атомарно добавить ОДНУ кнопку (предпочитай для «добавь X»)
-7. **update_page_button** — атомарно изменить поля ОДНОЙ кнопки (label/url/row/col/is_hidden)
-8. **update_page_buttons** — массовая перезапись списка кнопок (используй редко, только для batch-операций)
-9. **restart_bot_process** — перезапускать systemd-службу бота (НЕ вызывай сам)
-10. **execute_server_command** — диагностические команды на сервере
+4. **get_page_buttons** — кнопки страницы (visible/hidden раздельно)
+5. **get_page_content** — текст+картинка+счётчик кнопок страницы (читай ПЕРЕД правкой)
+6. **delete_page_button** — атомарно скрыть ОДНУ кнопку
+7. **add_page_button** — атомарно добавить/вернуть ОДНУ кнопку
+8. **update_page_button** — атомарно изменить поля ОДНОЙ кнопки
+9. **update_page_buttons** — массовая перезапись (редко)
+10. **update_page_text** / **reset_page_text** — текст страницы
+11. **update_page_image** / **reset_page_image** — картинка страницы (file_id из [CONTEXT].pending_image_file_id или URL)
+12. **restart_bot_process** — рестарт службы (НЕ вызывай сам)
+13. **execute_server_command** — диагностика сервера
 
 АРХИТЕКТУРА КНОПОК (ВАЖНО):
 - Главное меню (/start), страница помощи и пр. рендерятся из БД (таблица pages), а НЕ из bot/keyboards/user.py.
@@ -423,6 +445,94 @@ TOOLS: list[dict[str, Any]] = [
                         "description": "Ключ страницы: 'main' = главное меню /start, 'help' = справка.",
                     },
                 },
+                "required": ["page_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_page_content",
+            "description": (
+                "Возвращает полное содержимое страницы: текст, картинку (есть/нет, источник), "
+                "количество видимых/скрытых кнопок. Используй ПЕРЕД любой правкой страницы, "
+                "чтобы понять текущее состояние."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_key": {"type": "string"},
+                },
+                "required": ["page_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_page_text",
+            "description": (
+                "Меняет текст страницы (поле text_custom в БД). Поддерживает HTML aiogram: "
+                "<b>, <i>, <u>, <s>, <code>, <a href='...'>, <tg-emoji emoji-id='...'>. "
+                "Можно использовать плейсхолдеры типа %тарифы%, %дней%, {keyname} — они "
+                "подставятся при рендере. Изменения видны мгновенно."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_key": {"type": "string"},
+                    "text": {
+                        "type": "string",
+                        "description": "Новый текст. До 4000 символов. HTML aiogram поддерживается.",
+                    },
+                },
+                "required": ["page_key", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_page_text",
+            "description": "Сбрасывает кастомный текст страницы: рендер вернётся к дефолтному тексту.",
+            "parameters": {
+                "type": "object",
+                "properties": {"page_key": {"type": "string"}},
+                "required": ["page_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_page_image",
+            "description": (
+                "Меняет картинку страницы (поле image_custom). Принимает либо Telegram file_id "
+                "(длинный токен из 30+ символов без пробелов), либо URL (http(s)://...). "
+                "ВАЖНО: если в [CONTEXT] есть pending_image_file_id — используй именно его "
+                "(админ только что прислал фото). Изменения видны мгновенно."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page_key": {"type": "string"},
+                    "image": {
+                        "type": "string",
+                        "description": "Telegram file_id или URL картинки.",
+                    },
+                },
+                "required": ["page_key", "image"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_page_image",
+            "description": "Сбрасывает кастомную картинку страницы.",
+            "parameters": {
+                "type": "object",
+                "properties": {"page_key": {"type": "string"}},
                 "required": ["page_key"],
             },
         },
@@ -1085,6 +1195,181 @@ async def _update_page_button(
     )
 
 
+_MAX_TEXT_LEN = 4000  # Telegram caps: 4096 для message, 1024 для caption. С запасом.
+
+
+async def _update_page_text(page_key: str, text: Any) -> str:
+    """Меняет text_custom страницы. Принимает HTML aiogram (b, i, code, a, etc.)."""
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА update_page_text: не указан page_key"
+    if text is None:
+        return "ОШИБКА update_page_text: не указан text"
+    text_str = str(text)
+    if len(text_str) > _MAX_TEXT_LEN:
+        return (
+            f"ОШИБКА update_page_text: текст слишком длинный ({len(text_str)} символов). "
+            f"Максимум {_MAX_TEXT_LEN}. Сократи или используй несколько страниц."
+        )
+
+    from database.db_pages import get_page, update_page_custom
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА update_page_text: страница '{page_key}' не найдена"
+
+    try:
+        await asyncio.to_thread(update_page_custom, page_key, text=text_str)
+    except Exception as e:
+        return f"ОШИБКА update_page_text: запись в БД не удалась: {e}"
+
+    logger.info(
+        "DeepSeek Agent tool: update_page_text page_key=%s len=%d",
+        page_key, len(text_str),
+    )
+    return (
+        f"Текст страницы '{page_key}' обновлён ({len(text_str)} символов). "
+        "Изменения видны мгновенно."
+    )
+
+
+async def _reset_page_text(page_key: str) -> str:
+    """Сброс кастомного текста: рендер вернётся к text_default."""
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА reset_page_text: не указан page_key"
+
+    from database.db_pages import get_page, update_page_custom
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА reset_page_text: страница '{page_key}' не найдена"
+
+    try:
+        # Пустая строка в text_custom — page_renderer возьмёт text_default ("" falsy)
+        await asyncio.to_thread(update_page_custom, page_key, text="")
+    except Exception as e:
+        return f"ОШИБКА reset_page_text: запись в БД не удалась: {e}"
+
+    logger.info("DeepSeek Agent tool: reset_page_text page_key=%s", page_key)
+    return f"Текст страницы '{page_key}' сброшен на дефолтный. Изменения видны мгновенно."
+
+
+async def _update_page_image(page_key: str, image: Any) -> str:
+    """
+    Меняет image_custom: принимает Telegram file_id (короткий blob) ИЛИ URL.
+    """
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА update_page_image: не указан page_key"
+    if image is None or str(image).strip() == "":
+        return "ОШИБКА update_page_image: не указан image (file_id или URL). Для сброса используй reset_page_image."
+
+    image_str = str(image).strip()
+    # Лёгкая валидация: либо URL, либо непустая строка похожая на file_id (>= 20 chars)
+    is_url = image_str.startswith(("http://", "https://"))
+    is_file_id_like = len(image_str) >= 20 and not any(c.isspace() for c in image_str)
+    if not (is_url or is_file_id_like):
+        return (
+            f"ОШИБКА update_page_image: image должен быть Telegram file_id "
+            f"(длинный токен без пробелов) или URL (http(s)://...). Получено: {image_str[:60]!r}"
+        )
+
+    from database.db_pages import get_page, update_page_custom
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА update_page_image: страница '{page_key}' не найдена"
+
+    try:
+        await asyncio.to_thread(update_page_custom, page_key, image=image_str)
+    except Exception as e:
+        return f"ОШИБКА update_page_image: запись в БД не удалась: {e}"
+
+    kind = "URL" if is_url else "file_id"
+    logger.info(
+        "DeepSeek Agent tool: update_page_image page_key=%s kind=%s",
+        page_key, kind,
+    )
+    return (
+        f"Картинка страницы '{page_key}' обновлена ({kind}). "
+        "Изменения видны мгновенно — пользователь увидит её при следующем заходе."
+    )
+
+
+async def _reset_page_image(page_key: str) -> str:
+    """Сброс кастомной картинки: рендер вернётся к image_default (если есть) или без картинки."""
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА reset_page_image: не указан page_key"
+
+    from database.db_pages import get_page, update_page_custom
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА reset_page_image: страница '{page_key}' не найдена"
+
+    try:
+        await asyncio.to_thread(update_page_custom, page_key, image="")
+    except Exception as e:
+        return f"ОШИБКА reset_page_image: запись в БД не удалась: {e}"
+
+    logger.info("DeepSeek Agent tool: reset_page_image page_key=%s", page_key)
+    return f"Картинка страницы '{page_key}' сброшена. Изменения видны мгновенно."
+
+
+async def _get_page_content(page_key: str) -> str:
+    """
+    Возвращает текущее содержимое страницы: текст, картинку, число кнопок.
+    Помогает модели понять состояние перед изменением.
+    """
+    page_key = (page_key or "").strip()
+    if not page_key:
+        return "ОШИБКА get_page_content: не указан page_key"
+
+    try:
+        from bot.utils.page_renderer import get_page_data
+    except Exception as e:
+        return f"ОШИБКА get_page_content: импорт page_renderer не удался: {e}"
+
+    from database.db_pages import get_page
+    page_row = await asyncio.to_thread(get_page, page_key)
+    if not page_row:
+        return f"ОШИБКА get_page_content: страница '{page_key}' не найдена"
+
+    try:
+        data = await asyncio.to_thread(get_page_data, page_key)
+    except Exception as e:
+        return f"ОШИБКА get_page_content: чтение БД не удалось: {e}"
+
+    text = data.get("text") or ""
+    image = data.get("image")
+    buttons = data.get("buttons", []) or []
+    visible = sum(1 for b in buttons if not b.get("is_hidden"))
+    hidden = len(buttons) - visible
+
+    # Дополнительно показываем источник (custom или default)
+    text_source = "custom" if page_row.get("text_custom") else "default"
+    image_source = "custom" if page_row.get("image_custom") else (
+        "default" if page_row.get("image_default") else "none"
+    )
+
+    text_preview = text if len(text) <= 800 else text[:800] + f"\n... (обрезано, всего {len(text)} символов)"
+
+    logger.info(
+        "DeepSeek Agent tool: get_page_content page_key=%s text_src=%s image_src=%s buttons=%d",
+        page_key, text_source, image_source, len(buttons),
+    )
+
+    out = [
+        f"=== Содержимое страницы '{page_key}' ===",
+        f"Текст ({text_source}, {len(text)} символов):",
+        text_preview,
+        "",
+        f"Картинка: {image_source}" + (f" — {image[:60]}..." if image else ""),
+        "",
+        f"Кнопки: видимых {visible}, скрытых {hidden}. Подробности — get_page_buttons.",
+        "=== КОНЕЦ ===",
+    ]
+    return "\n".join(out)
+
+
 async def _update_page_buttons(
     page_key: str,
     buttons: Any,
@@ -1347,6 +1632,27 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
             return "ОШИБКА: не указан page_key для get_page_buttons"
         return await _get_page_buttons(page_key)
 
+    elif tool_name == "get_page_content":
+        return await _get_page_content(str(arguments.get("page_key", "")).strip())
+
+    elif tool_name == "update_page_text":
+        return await _update_page_text(
+            str(arguments.get("page_key", "")).strip(),
+            arguments.get("text"),
+        )
+
+    elif tool_name == "reset_page_text":
+        return await _reset_page_text(str(arguments.get("page_key", "")).strip())
+
+    elif tool_name == "update_page_image":
+        return await _update_page_image(
+            str(arguments.get("page_key", "")).strip(),
+            arguments.get("image"),
+        )
+
+    elif tool_name == "reset_page_image":
+        return await _reset_page_image(str(arguments.get("page_key", "")).strip())
+
     elif tool_name == "delete_page_button":
         page_key = str(arguments.get("page_key", "")).strip()
         button_id = str(arguments.get("button_id", "")).strip()
@@ -1411,6 +1717,7 @@ async def run_dialog(
     system_prompt: str | None = None,
     progress_callback: ProgressCallback | None = None,
     current_page_key: Optional[str] = None,
+    pending_image_file_id: Optional[str] = None,
 ) -> tuple[str, list[str]]:
     """
     Отправляет сообщение модели DeepSeek и выполняет полный цикл
@@ -1424,6 +1731,9 @@ async def run_dialog(
             (читается через bot.services.page_context.get_page_context). Если задан,
             добавляется в начало пользовательского сообщения и модель использует его
             как default для get_page_buttons / update_page_buttons.
+        pending_image_file_id: Telegram file_id фото, которое админ только что прислал.
+            Если задан — модель должна использовать его в update_page_image, если задача
+            про картинку.
 
     НИКОГДА не вызывает restart_bot_process внутри — это делает handler после ответа.
 
@@ -1481,27 +1791,50 @@ async def run_dialog(
                 "modify_file_content",
                 "patch_file_content",
                 "get_page_buttons",
+                "get_page_content",
                 "update_page_buttons",
                 "delete_page_button",
                 "add_page_button",
                 "update_page_button",
+                "update_page_text",
+                "reset_page_text",
+                "update_page_image",
+                "reset_page_image",
             )
         ]
     else:
         active_tools = TOOLS
 
-    # Подмешиваем контекст экрана админа, если он передан.
+    # Подмешиваем контекст экрана админа и pending-картинки, если они переданы.
     # Это сильнее всего помогает модели понять «здесь/сюда/тут» в командах вроде
     # «/ai добавь сюда кнопку» — она увидит current_page_key и подставит его как default.
     page_context_key = (current_page_key or "").strip()
+    pending_image = (pending_image_file_id or "").strip()
+    context_lines: list[str] = []
     if page_context_key:
+        context_lines.append(f"current_page_key='{page_context_key}'")
+    if pending_image:
+        context_lines.append(f"pending_image_file_id='{pending_image}'")
+
+    if context_lines:
+        notes = [
+            "(Это технические подсказки от системы, не часть задачи админа.)",
+        ]
+        if page_context_key:
+            notes.append(
+                "Слова «здесь», «сюда», «тут», «туда», «это меню», «эта страница» "
+                "относятся к current_page_key. Если page_key явно не указан — это default."
+            )
+        if pending_image:
+            notes.append(
+                "Админ только что прислал фото — file_id выше. Если задача про картинку "
+                "(«поставь сюда», «замени картинку», «обнови фото»), вызови "
+                "update_page_image(page_key=<нужная>, image=pending_image_file_id)."
+            )
         contextualized_user_message = (
-            f"[CONTEXT] current_page_key='{page_context_key}'\n"
-            f"(Админ сейчас находится на этой странице бота. Слова "
-            f"«здесь», «сюда», «тут», «туда», «это меню», «эта страница» "
-            f"относятся к ней. Если в задаче явный page_key не указан — "
-            f"используй current_page_key как default.)\n\n"
-            f"ЗАДАЧА: {user_message}"
+            "[CONTEXT] " + "; ".join(context_lines) + "\n"
+            + "\n".join(notes) + "\n\n"
+            + f"ЗАДАЧА: {user_message}"
         )
     else:
         contextualized_user_message = user_message
@@ -1609,6 +1942,19 @@ async def run_dialog(
                     await _progress(f"🔧 Патчу {path_hint}...")
                 elif tool_name == "get_page_buttons":
                     await _progress(f"🔍 Читаю актуальные кнопки страницы '{page_hint}' из БД...")
+                elif tool_name == "get_page_content":
+                    await _progress(f"🔍 Читаю содержимое страницы '{page_hint}'...")
+                elif tool_name == "update_page_text":
+                    t = str(args.get("text", ""))
+                    await _progress(f"📝 Меняю текст страницы '{page_hint}' ({len(t)} символов)...")
+                elif tool_name == "reset_page_text":
+                    await _progress(f"↩️ Сбрасываю текст страницы '{page_hint}' на дефолтный...")
+                elif tool_name == "update_page_image":
+                    img = str(args.get("image", ""))
+                    kind = "URL" if img.startswith(("http://", "https://")) else "file_id"
+                    await _progress(f"🖼 Меняю картинку страницы '{page_hint}' ({kind})...")
+                elif tool_name == "reset_page_image":
+                    await _progress(f"↩️ Сбрасываю картинку страницы '{page_hint}'...")
                 elif tool_name == "delete_page_button":
                     bid = str(args.get("button_id", ""))
                     await _progress(f"❌ Скрываю кнопку '{bid}' на странице '{page_hint}'...")
@@ -1644,6 +1990,10 @@ async def run_dialog(
                     "delete_page_button",
                     "add_page_button",
                     "update_page_button",
+                    "update_page_text",
+                    "reset_page_text",
+                    "update_page_image",
+                    "reset_page_image",
                 )
                 if tool_name in _DB_WRITE_TOOLS and not result_text.startswith("ОШИБКА"):
                     if page_hint and page_hint not in db_updated_pages:
