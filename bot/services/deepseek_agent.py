@@ -206,11 +206,16 @@ update_page_buttons — ты ЗАТРЁШЬ все ранее добавленн
 Шаг 1: get_page_buttons(page_key=<ключ>).
        Получи АКТУАЛЬНЫЙ список текущих кнопок из БД (мёрж default + custom). Это то,
        что пользователь сейчас видит на экране.
-Шаг 2: update_page_buttons(page_key=<ключ>, buttons=[...]).
-       Передай ПОЛНЫЙ список: ВСЕ кнопки из Шага 1 + твои добавления/изменения.
-       Если задача «добавь кнопку X» — добавь X к списку из Шага 1, ничего не убирая.
-       Если задача «удали кнопку X» — убери из списка из Шага 1 только X, остальные оставь.
-       Если задача «замени X на Y» — замени только X.
+Шаг 2: update_page_buttons(page_key=<ключ>, buttons=[...], hide_default_ids=[...]).
+       Семантика операций:
+       • «добавь кнопку X»  → buttons = ВСЕ кнопки из Шага 1 + X. hide_default_ids опускаешь.
+       • «удали кнопку X»   → ВАЖНО: просто опустить кнопку В НЕДОСТАТОЧНО, рендер возьмёт
+         её обратно из дефолтов. ДВА правильных способа:
+           (а) положи её id в hide_default_ids=['btn_X'], buttons можно оставить пустым [].
+           (б) включи её в buttons со всеми полями но is_hidden=true.
+         Предпочитай (а) — короче и читаемее.
+       • «замени X на Y»    → в buttons вместо X положи Y с тем же id.
+       • «измени label/url у X» → в buttons передай только X с новыми полями.
 
 КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО в ВЕТКЕ А:
 - Вызывать read_file_content('database/migrations.py') для получения текущих кнопок.
@@ -233,13 +238,18 @@ update_page_buttons — ты ЗАТРЁШЬ все ранее добавленн
   "is_hidden": false
 }
 
-ПРИМЕР (задача «добавь кнопку Тест https://example.com в конец главного меню»):
-1) Вызвал get_page_buttons('main') — получил 7 кнопок (например, дефолтные + добавленные ранее btn_privacy, btn_terms).
-2) Вычислил max(row) среди них (например, 3) → новая кнопка пойдёт на row=4.
-3) Вызвал update_page_buttons('main', buttons=[
+ПРИМЕР 1 — добавление («добавь кнопку Тест https://example.com в конец главного меню»):
+1) get_page_buttons('main') → получил 7 кнопок (дефолтные + добавленные ранее btn_privacy, btn_terms).
+2) max(row) среди них = 3 → новая кнопка пойдёт на row=4.
+3) update_page_buttons('main', buttons=[
      <... все 7 кнопок из Шага 1 БЕЗ ИЗМЕНЕНИЙ ...>,
      {"id":"btn_test","label":"🧪 Тест","row":4,"col":0,"action_type":"url","action_value":"https://example.com","color":"secondary","is_hidden":false}
    ])
+
+ПРИМЕР 2 — удаление дефолтной кнопки («убери кнопку Поддержка со страницы справки»):
+1) get_page_buttons('help') → нашёл там {"id":"btn_support","label":"💬 Поддержка", ...}.
+2) update_page_buttons('help', buttons=[], hide_default_ids=['btn_support'])
+   Этого достаточно. НЕ пытайся «просто опустить» btn_support — рендер возьмёт её из дефолтов.
 
 ВЕТКА Б: «кнопки админ-панели» или «другой Python-код»
 АЛГОРИТМ — РОВНО 2 ШАГА:
@@ -289,9 +299,12 @@ current_page_key как default. Если контекста нет и стра�
   1) get_page_buttons(page_key='main' или 'help') — получи АКТУАЛЬНЫЙ список того, что сейчас на экране.
   2) update_page_buttons(page_key, buttons=[...]) — передай ВСЕ кнопки из шага 1 + твои изменения. Не теряй существующие!
   Семантика задач:
-   • «добавь X» → возьми список из get_page_buttons и допиши X (новый row).
-   • «удали X» → возьми список и убери только X, остальные оставь.
-   • «замени X на Y» → замени только X.
+   • «добавь X» → buttons = существующие из get_page_buttons + X.
+   • «удали X» → ВАЖНО: пропустить кнопку в buttons НЕ удалит её — рендер берёт её из дефолтов.
+     Делай так: update_page_buttons(page_key, buttons=[], hide_default_ids=['btn_X']).
+     Либо включи X в buttons с is_hidden=true.
+   • «замени X на Y» → в buttons передай Y с тем же id.
+   • «измени label/url у X» → в buttons передай X с новыми полями.
   ЗАПРЕЩЕНО для этой задачи читать database/migrations.py — там устаревшие дефолты.
 - Для других правок кода: read_file_content → patch_file_content (скопируй фрагмент ОДИН-В-ОДИН как search).
 - Для нового файла используй modify_file_content.
@@ -404,14 +417,14 @@ TOOLS: list[dict[str, Any]] = [
             "name": "update_page_buttons",
             "description": (
                 "Обновляет кнопки страницы в базе данных (таблица pages, поле buttons_custom). "
-                "Изменения видны мгновенно, БЕЗ перезапуска бота. "
-                "ИСПОЛЬЗУЙ ЭТО для добавления/изменения кнопок главного меню (page_key='main'), "
-                "страницы помощи (page_key='help') и других страниц из таблицы pages. "
-                "НЕ редактируй для этого файлы bot/keyboards/user.py или database/migrations.py — "
-                "главное меню рендерится из БД, а не из кода. "
-                "Передавай ПОЛНЫЙ список кнопок (новые + существующие). Для добавления новых кнопок "
-                "к существующим — сначала прочитай database/migrations.py чтобы узнать дефолтные кнопки, "
-                "потом передай полный список (новые + все старые, с обновлёнными row/col при необходимости)."
+                "Изменения видны мгновенно, БЕЗ перезапуска бота.\n"
+                "Используй для любой операции с кнопками страниц main/help/trial/prepayment/referral/key_delivery: "
+                "добавить, изменить label/ссылку, перенести, СКРЫТЬ.\n"
+                "Передавай ПОЛНЫЙ список кнопок страницы в buttons (бери актуальный список через get_page_buttons).\n"
+                "ВАЖНО ПРО УДАЛЕНИЕ ДЕФОЛТНЫХ КНОПОК: "
+                "просто опустить кнопку в buttons НЕ удалит её — рендер всё равно возьмёт её из дефолтов. "
+                "Чтобы убрать дефолтную кнопку с экрана: "
+                "либо передай её id в hide_default_ids, либо включи её в buttons с is_hidden=true."
             ),
             "parameters": {
                 "type": "object",
@@ -423,11 +436,13 @@ TOOLS: list[dict[str, Any]] = [
                     "buttons": {
                         "type": "array",
                         "description": (
-                            "ПОЛНЫЙ список кнопок страницы. Каждая кнопка — объект со следующими полями: "
+                            "ПОЛНЫЙ список кнопок страницы (включая и видимые, и скрытые с is_hidden=true). "
+                            "Каждая кнопка — объект с полями: "
                             "id (str, уникальный), label (str, текст с эмодзи), row (int, ряд от 0), "
                             "col (int, колонка 0 или 1), action_type (str: 'internal' | 'url' | 'system'), "
                             "action_value (str: callback-имя для internal, URL для url), "
-                            "color (str, обычно 'secondary'), is_hidden (bool, обычно false)."
+                            "color (str, обычно 'secondary'), is_hidden (bool; true чтобы скрыть, "
+                            "в т.ч. дефолтную кнопку)."
                         ),
                         "items": {
                             "type": "object",
@@ -446,6 +461,17 @@ TOOLS: list[dict[str, Any]] = [
                             },
                             "required": ["id", "label", "row", "col", "action_type", "action_value"],
                         },
+                    },
+                    "hide_default_ids": {
+                        "type": "array",
+                        "description": (
+                            "Опциональный список id ДЕФОЛТНЫХ кнопок, которые нужно скрыть. "
+                            "Шорткат для удаления: вместо того чтобы добавлять кнопку в buttons "
+                            "со всеми полями и is_hidden=true, просто перечисли её id здесь. "
+                            "Используй когда задача — «убери/удали кнопку X». "
+                            "При этом buttons может быть пустым массивом."
+                        ),
+                        "items": {"type": "string"},
                     },
                 },
                 "required": ["page_key", "buttons"],
@@ -691,12 +717,23 @@ def _normalize_button(btn: Any, idx: int) -> dict:
     return normalized
 
 
-async def _update_page_buttons(page_key: str, buttons: Any) -> str:
+async def _update_page_buttons(
+    page_key: str,
+    buttons: Any,
+    hide_default_ids: Any = None,
+) -> str:
     """
     Прямая запись кнопок страницы в БД (поле buttons_custom).
 
     Изменения видны мгновенно — рендер главного меню читает pages.buttons_custom при
     каждом /start. Перезапуск бота не требуется.
+
+    Важно про удаление дефолтных кнопок:
+    Логика мёржа в page_renderer.py не позволяет «удалить» дефолтную кнопку,
+    просто опустив её в buttons. Default-кнопки берутся из buttons_default по id.
+    Чтобы кнопка не отображалась — её надо включить в buttons с флагом
+    is_hidden=true, либо передать её id в hide_default_ids (этот хелпер сам
+    добавит запись с is_hidden=true).
     """
     page_key = (page_key or "").strip()
     if not page_key:
@@ -708,10 +745,48 @@ async def _update_page_buttons(page_key: str, buttons: Any) -> str:
             f"получено: {type(buttons).__name__}"
         )
 
+    # hide_default_ids — опциональный список id для скрытия дефолтных кнопок.
+    hide_ids: list[str] = []
+    if hide_default_ids is not None:
+        if not isinstance(hide_default_ids, list):
+            return (
+                "ОШИБКА update_page_buttons: hide_default_ids должен быть массивом (list) id строк, "
+                f"получено: {type(hide_default_ids).__name__}"
+            )
+        for hid in hide_default_ids:
+            hid_str = str(hid).strip()
+            if hid_str:
+                hide_ids.append(hid_str)
+
     try:
         normalized = [_normalize_button(b, i) for i, b in enumerate(buttons)]
     except DeepSeekAgentError as e:
         return f"ОШИБКА update_page_buttons: {e}"
+
+    # Применяем hide_default_ids: для каждого id, который ещё не в buttons,
+    # добавим заглушку с is_hidden=true. Если id уже в списке — принудительно
+    # установим is_hidden=true (выигрывает явное скрытие).
+    if hide_ids:
+        present_ids = {b["id"] for b in normalized}
+        for hid in hide_ids:
+            if hid in present_ids:
+                for b in normalized:
+                    if b["id"] == hid:
+                        b["is_hidden"] = True
+                        break
+            else:
+                # Минимальная корректная запись-tombstone: id + is_hidden=true.
+                # Остальные обязательные поля заполняем no-op значениями.
+                normalized.append({
+                    "id": hid,
+                    "label": "",
+                    "color": "secondary",
+                    "row": 0,
+                    "col": 0,
+                    "is_hidden": True,
+                    "action_type": "internal",
+                    "action_value": "noop",
+                })
 
     # Проверка уникальности id
     seen_ids: set[str] = set()
@@ -749,14 +824,20 @@ async def _update_page_buttons(page_key: str, buttons: Any) -> str:
     except Exception as e:
         return f"ОШИБКА update_page_buttons: запись в БД не удалась: {e}"
 
+    visible_count = sum(1 for b in normalized if not b.get("is_hidden"))
+    hidden_count = len(normalized) - visible_count
+
     logger.info(
-        "DeepSeek Agent tool: update_page_buttons page_key=%s buttons=%d",
+        "DeepSeek Agent tool: update_page_buttons page_key=%s buttons=%d visible=%d hidden=%d",
         page_key,
         len(normalized),
+        visible_count,
+        hidden_count,
     )
 
+    hide_note = f", скрыто (is_hidden=true) {hidden_count}" if hidden_count else ""
     return (
-        f"Кнопки страницы '{page_key}' обновлены ({len(normalized)} шт.). "
+        f"Кнопки страницы '{page_key}' обновлены: {visible_count} видимых{hide_note}. "
         "Изменения видны мгновенно, перезапуск НЕ требуется."
     )
 
@@ -901,11 +982,17 @@ async def _execute_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
     elif tool_name == "update_page_buttons":
         page_key = str(arguments.get("page_key", "")).strip()
         buttons = arguments.get("buttons")
+        hide_default_ids = arguments.get("hide_default_ids")
         if not page_key:
             return "ОШИБКА: не указан page_key для update_page_buttons"
         if buttons is None:
-            return "ОШИБКА: не указан buttons для update_page_buttons (передай полный список кнопок)"
-        return await _update_page_buttons(page_key, buttons)
+            # Допускаем пустой buttons, если переданы только hide_default_ids
+            # (сценарий «просто скрой кнопку X»).
+            if hide_default_ids:
+                buttons = []
+            else:
+                return "ОШИБКА: не указан buttons для update_page_buttons (передай полный список кнопок)"
+        return await _update_page_buttons(page_key, buttons, hide_default_ids=hide_default_ids)
 
     elif tool_name == "restart_bot_process":
         service_name = str(arguments.get("service_name", "yadreno-vpn")).strip()
