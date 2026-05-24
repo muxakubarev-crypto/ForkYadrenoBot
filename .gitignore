@@ -28,3 +28,24 @@ env/
 env*/
 venv*/
 .env
+
+# Снапшоты с НЕмаскированными настройками (--include-settings-unsafe). Никогда в git!
+snapshots/**/*-unsafe/
+snapshots/**/*-unsafe
+snapshots/**/unsafe-*/
+
+# Любые SQLite базы (защита если кто-то положил .db не в database/)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.bak-*
+
+# Файлы со снятыми ключами/секретами
+*secret*.json
+*secret*.yaml
+*credentials*.json
+*credentials*.txt
+.git-credentials
+**/secrets/
+**/private/

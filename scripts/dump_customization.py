@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-Дамп кастомизации бота из таблицы pages (и settings, если есть) в JSON.
+Дамп кастомизации бота из таблицы pages в JSON.
 
-Сохраняет ТОЛЬКО админскую кастомизацию (text_custom, image_custom, buttons_custom
-и значения настроек), НЕ трогая user-data (пользователи, ключи, платежи). Поэтому
-результат БЕЗОПАСНО коммитить в публичный git-репозиторий.
+БЕЗОПАСНОСТЬ:
+Таблица `settings` содержит платёжные секреты (yookassa_secret_key, provider_token,
+crypto_secret_key, platega_secret и пр.). По умолчанию settings НЕ выгружаются.
 
-Использование (на сервере или локально):
+Что выгружается по умолчанию (безопасно для git):
+- pages: все поля включая text_custom, image_custom, buttons_custom
+
+Опционально:
+- --include-settings        — выгружает settings с маскировкой (<REDACTED>)
+- --include-settings-unsafe — выгружает settings БЕЗ маскировки; папка получает
+                              суффикс -unsafe и автоматически попадает в .gitignore
+
+Использование:
     python3 scripts/dump_customization.py
-    python3 scripts/dump_customization.py --tag manual-2026-05-22
+    python3 scripts/dump_customization.py --tag stable-2026-05-23
+    python3 scripts/dump_customization.py --include-settings
+    python3 scripts/dump_customization.py --include-settings-unsafe  # НЕ для git
 
 Результат:
-    snapshots/<YYYY-MM-DD>[-<tag>]/customization.json
-    snapshots/<YYYY-MM-DD>[-<tag>]/meta.json
+    snapshots/<YYYY-MM-DD>[-<tag>][-unsafe]/customization.json
+    snapshots/<YYYY-MM-DD>[-<tag>][-unsafe]/meta.json
 """
 from __future__ import annotations
 
@@ -62,8 +72,29 @@ def dump_pages(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
-def dump_settings(conn: sqlite3.Connection) -> list[dict] | None:
-    """Снимает таблицу settings, если она существует."""
+# Подстроки в имени ключа, которые указывают на секрет → маскируем при --include-settings.
+_SECRET_NAME_PATTERNS: tuple[str, ...] = (
+    "secret", "token", "api_key", "apikey",
+    "password", "passwd", "private",
+    "merchant_id", "shop_id", "provider_token",
+)
+
+
+def _is_secret_key(name: str) -> bool:
+    lower = (name or "").lower()
+    return any(p in lower for p in _SECRET_NAME_PATTERNS)
+
+
+def dump_settings(
+    conn: sqlite3.Connection,
+    mask_secrets: bool = True,
+) -> list[dict] | None:
+    """
+    Снимает таблицу settings, если она существует.
+
+    При mask_secrets=True значения подозрительных ключей заменяются на "<REDACTED>".
+    Даже после маскировки лучше не пушить settings в публичный git без необходимости.
+    """
     cur = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
     )
@@ -71,7 +102,20 @@ def dump_settings(conn: sqlite3.Connection) -> list[dict] | None:
         return None
     cur = conn.execute("SELECT * FROM settings")
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    if not mask_secrets:
+        return rows
+
+    masked = []
+    for r in rows:
+        key_field = r.get("key")
+        if key_field and _is_secret_key(key_field):
+            r = dict(r)
+            if r.get("value"):
+                r["value"] = "<REDACTED>"
+        masked.append(r)
+    return masked
 
 
 def main() -> int:
@@ -79,12 +123,22 @@ def main() -> int:
     p.add_argument(
         "--tag",
         default="",
-        help="Дополнительный суффикс к имени папки снапшота (например, 'before-ai-rework')",
+        help="Дополнительный суффикс к имени папки снапшота (например, 'stable-2026-05-23')",
     )
     p.add_argument(
         "--db",
         default=str(DB_PATH),
         help=f"Путь к файлу БД (по умолчанию: {DB_PATH})",
+    )
+    p.add_argument(
+        "--include-settings",
+        action="store_true",
+        help="Выгрузить таблицу settings с маскировкой секретов (<REDACTED>)",
+    )
+    p.add_argument(
+        "--include-settings-unsafe",
+        action="store_true",
+        help="Выгрузить settings БЕЗ маскировки. ОПАСНО — папка получит суффикс -unsafe и попадёт в .gitignore.",
     )
     args = p.parse_args()
 
@@ -93,8 +147,19 @@ def main() -> int:
         print(f"ОШИБКА: БД не найдена по пути {db_path}", file=sys.stderr)
         return 1
 
+    # Режим выгрузки settings: по умолчанию пропускаем.
+    if args.include_settings_unsafe:
+        settings_mode = "unsafe"
+    elif args.include_settings:
+        settings_mode = "masked"
+    else:
+        settings_mode = "skipped"
+
     today = datetime.now().strftime("%Y-%m-%d")
     folder_name = f"{today}-{args.tag}" if args.tag else today
+    # Unsafe-снапшоты получают суффикс -unsafe — .gitignore их блокирует.
+    if settings_mode == "unsafe":
+        folder_name = f"{folder_name}-unsafe"
     out_dir = SNAPSHOTS_DIR / folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,7 +167,10 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     try:
         pages = dump_pages(conn)
-        settings = dump_settings(conn)
+        if settings_mode == "skipped":
+            settings = None
+        else:
+            settings = dump_settings(conn, mask_secrets=(settings_mode == "masked"))
     finally:
         conn.close()
 
@@ -110,6 +178,7 @@ def main() -> int:
         "schema_version": 1,
         "pages": pages,
         "settings": settings,
+        "settings_mode": settings_mode,
     }
 
     customization_path = out_dir / "customization.json"
@@ -123,11 +192,17 @@ def main() -> int:
         "db_path": str(db_path),
         "db_size_bytes": db_path.stat().st_size,
         "pages_count": len(pages),
-        "settings_count": len(settings) if settings is not None else None,
+        "settings_count": len(settings) if settings is not None else 0,
+        "settings_mode": settings_mode,
+        "safe_for_public_repo": settings_mode in ("skipped", "masked"),
         "tag": args.tag or None,
         "note": (
-            "Содержит только кастомизацию страниц и настройки. "
-            "Не содержит пользователей, ключей, платежей."
+            "Содержит кастомизацию страниц. Не содержит пользователей, ключей, платежей."
+            + {
+                "skipped": " Таблица settings не выгружалась.",
+                "masked": " settings выгружены с маскировкой секретов (<REDACTED>).",
+                "unsafe": " ВНИМАНИЕ: settings выгружены БЕЗ маскировки. НЕ публикуй!",
+            }[settings_mode]
         ),
     }
     (out_dir / "meta.json").write_text(
@@ -138,13 +213,19 @@ def main() -> int:
     print(f"OK Снапшот сохранён в: {out_dir}")
     print(f"   - страниц: {len(pages)}")
     if settings is not None:
-        print(f"   - настроек: {len(settings)}")
+        print(f"   - настроек: {len(settings)} (режим: {settings_mode})")
+    else:
+        print(f"   - настроек: пропущены (settings_mode=skipped)")
     print(f"   - размер БД: {meta['db_size_bytes'] / 1024:.1f} KB")
     print()
-    print(f"Закоммить и запушь:")
-    print(f"   git add snapshots/{folder_name}/")
-    print(f"   git commit -m 'snapshot: customization {folder_name}'")
-    print(f"   git push")
+    if settings_mode == "unsafe":
+        print("!!! ВНИМАНИЕ: settings выгружены БЕЗ маскировки !!!")
+        print(f"!!! Папка ({out_dir}) попадает в .gitignore, в git НЕ закоммитится.")
+    else:
+        print("Безопасно публиковать. Закоммить и запушь:")
+        print(f"   git add snapshots/{folder_name}/")
+        print(f"   git commit -m 'snapshot: customization {folder_name}'")
+        print(f"   git push")
     return 0
 
 
